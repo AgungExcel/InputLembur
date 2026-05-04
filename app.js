@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.4.0';
+  const APP_VERSION = 'online-realtime-1.5.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -194,7 +194,8 @@
   }
 
   async function upsertKaryawanRows(rows) {
-    for (const part of chunkArray(rows, 500)) {
+    const cleanRows = sanitizeKaryawanRows(rows);
+    for (const part of chunkArray(cleanRows, 500)) {
       const payload = part.map(k => ({ id: k.id, nama: k.nama, section: k.section || '', status: normalizeStatus(k.status) }));
       const { error } = await state.supabase.from('karyawan').upsert(payload, { onConflict: 'id' });
       if (error) throw error;
@@ -204,8 +205,9 @@
   async function insertMissingKaryawanRows(rows) {
     // Dipakai oleh tombol Update DB: hanya menambahkan ID yang belum ada.
     // Data lama tidak ditimpa, sehingga proses jauh lebih cepat untuk update harian.
-    if (!rows.length) return;
-    for (const part of chunkArray(rows, 500)) {
+    const cleanRows = sanitizeKaryawanRows(rows);
+    if (!cleanRows.length) return;
+    for (const part of chunkArray(cleanRows, 500)) {
       const payload = part.map(k => ({ id: k.id, nama: k.nama, section: k.section || '', status: normalizeStatus(k.status) }));
       const { error } = await state.supabase.from('karyawan').upsert(payload, { onConflict: 'id', ignoreDuplicates: true });
       if (error) throw error;
@@ -213,20 +215,24 @@
   }
 
   function splitNewKaryawanRows(parsedRows, existingRows) {
-    const existingIds = new Set((existingRows || []).map(k => String(k.id || '').trim()).filter(Boolean));
+    const cleanParsed = sanitizeKaryawanRows(parsedRows);
+    const cleanExisting = sanitizeKaryawanRows(existingRows || []);
+    const existingIds = new Set(cleanExisting.map(k => String(k.id || '').trim()).filter(Boolean));
     const baru = [];
     const sudahAda = [];
-    parsedRows.forEach(k => {
+    cleanParsed.forEach(k => {
       if (existingIds.has(String(k.id))) sudahAda.push(k);
       else baru.push(k);
     });
-    return { baru, sudahAda };
+    return { baru, sudahAda, invalid: Math.max((parsedRows || []).length - cleanParsed.length, 0) };
   }
 
   function mergeKaryawanTambahBaru(existingRows, parsedRows) {
-    const map = new Map((existingRows || []).map(k => [String(k.id), k]));
+    const cleanExisting = sanitizeKaryawanRows(existingRows || []);
+    const cleanParsed = sanitizeKaryawanRows(parsedRows || []);
+    const map = new Map(cleanExisting.map(k => [String(k.id), k]));
     let added = 0;
-    parsedRows.forEach(k => {
+    cleanParsed.forEach(k => {
       if (!map.has(String(k.id))) {
         map.set(String(k.id), k);
         added += 1;
@@ -235,7 +241,8 @@
     return {
       rows: Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama)),
       added,
-      skipped: Math.max(parsedRows.length - added, 0)
+      skipped: Math.max(cleanParsed.length - added, 0),
+      invalid: Math.max((parsedRows || []).length - cleanParsed.length, 0)
     };
   }
 
@@ -281,6 +288,39 @@
     const num = Number(str);
     if (!Number.isFinite(num) || num <= 0) return '';
     return String(num).replace(/\.0$/, '');
+  }
+
+  function isInvalidKaryawanRow(k) {
+    const id = cleanText(k?.id, true);
+    const nama = cleanText(k?.nama, true);
+    const section = cleanText(k?.section, true);
+    const idKey = normalizeKey(id);
+    const namaKey = normalizeKey(nama);
+    const sectionKey = normalizeKey(section);
+
+    if (!id || !nama) return true;
+    if (isExcelErrorText(id) || isExcelErrorText(nama)) return true;
+
+    // Cegah baris dummy/hasil formula kosong dari Excel seperti 0 | 0 | 0.
+    // Baris ini sering muncul dari file DB yang memakai external formula/cache Excel.
+    if (idKey === '0' || namaKey === '0') return true;
+    if (idKey === '0' && namaKey === '0' && (!sectionKey || sectionKey === '0')) return true;
+
+    // Cegah header yang tidak sengaja ikut terbaca sebagai data.
+    if (['id', 'nomorid', 'noid', 'nik', 'nip', 'employeeid', 'karyawanid'].includes(idKey)) return true;
+    if (['nama', 'namakaryawan', 'name', 'employeename'].includes(namaKey)) return true;
+
+    return false;
+  }
+
+  function sanitizeKaryawanRows(rows) {
+    const map = new Map();
+    (rows || []).forEach(row => {
+      const k = dbToAppKaryawan(row);
+      if (isInvalidKaryawanRow(k)) return;
+      map.set(String(k.id), k);
+    });
+    return Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama));
   }
 
   function getOvertimeCode(jam, status, holiday) {
@@ -344,7 +384,7 @@
   function migrateOldCache() {
     const oldDb = getLS(LS.oldKaryawan, null);
     const oldLembur = getLS(LS.oldLembur, null);
-    if (!getLS(LS.karyawan, null) && Array.isArray(oldDb) && oldDb.length) setLS(LS.karyawan, oldDb.map(dbToAppKaryawan).filter(k => k.id && k.nama));
+    if (!getLS(LS.karyawan, null) && Array.isArray(oldDb) && oldDb.length) setLS(LS.karyawan, sanitizeKaryawanRows(oldDb));
     if (!getLS(LS.lembur, null) && Array.isArray(oldLembur) && oldLembur.length) setLS(LS.lembur, oldLembur.map(dbToAppLembur));
   }
 
@@ -352,7 +392,7 @@
     migrateOldCache();
     const karyawan = getLS(LS.karyawan, null);
     const lembur = getLS(LS.lembur, null);
-    state.karyawan = Array.isArray(karyawan) && karyawan.length ? karyawan.map(dbToAppKaryawan).filter(k => k.id && k.nama) : DEFAULT_DATABASE;
+    state.karyawan = Array.isArray(karyawan) && karyawan.length ? sanitizeKaryawanRows(karyawan) : DEFAULT_DATABASE;
     state.lembur = Array.isArray(lembur) ? lembur.map(dbToAppLembur).filter(x => x.tanggal === state.inputDate) : [];
   }
 
@@ -362,6 +402,18 @@
     setLS(LS.karyawan, state.karyawan);
     setLS(LS.lembur, [...state.lembur, ...otherDates]);
     setLS(LS.nama, state.namaPenginput || '');
+  }
+
+  async function cleanupInvalidKaryawanOnline() {
+    if (!state.onlineMode || !state.supabase) return;
+    try {
+      // Hapus baris dummy yang pernah terlanjur masuk: id=0 / nama=0.
+      // Jika policy Supabase tidak mengizinkan, aplikasi tetap jalan dan filter lokal tetap menyembunyikannya.
+      const { error } = await state.supabase.from('karyawan').delete().or('id.eq.0,nama.eq.0');
+      if (error) console.warn('Cleanup baris 0 gagal:', error.message || error);
+    } catch (err) {
+      console.warn('Cleanup baris 0 gagal:', err.message || err);
+    }
   }
 
   async function init() {
@@ -378,6 +430,7 @@
         state.onlineMode = true;
         state.onlineReady = true;
         setLS(LS.lastMode, 'online');
+        await cleanupInvalidKaryawanOnline();
         await Promise.all([loadKaryawan(), loadLembur()]);
         await autoLoadDatabaseXlsx(true, true, false);
         await loadKaryawan();
@@ -407,7 +460,7 @@
     const data = await fetchAllRows('karyawan', '*', {
       order: { column: 'nama', ascending: true }
     });
-    state.karyawan = (data || []).map(dbToAppKaryawan).filter(k => k.id && k.nama);
+    state.karyawan = sanitizeKaryawanRows(data || []);
     state.totalKaryawanAll = state.karyawan.length;
     setLS(LS.karyawan, state.karyawan);
   }
@@ -867,14 +920,7 @@
   }
 
   function parseKaryawanRows(rows) {
-    const map = new Map();
-    rows.forEach(row => {
-      const k = dbToAppKaryawan(row);
-      if (!k.id || !k.nama) return;
-      if (isExcelErrorText(k.id) || isExcelErrorText(k.nama)) return;
-      map.set(k.id, k);
-    });
-    return Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama));
+    return sanitizeKaryawanRows(rows || []);
   }
 
   function parseLemburRows(rows) {
@@ -944,7 +990,7 @@
       }
 
       if (added) {
-        toast('success', 'Database ditambah', `${added} karyawan baru masuk. ${skipped} sudah ada dan dilewati.`);
+        toast('success', 'Database ditambah', `${added} karyawan baru masuk. ${skipped} sudah ada dan dilewati. Baris tidak valid otomatis dibuang.`);
       } else {
         toast('info', 'Tidak ada data baru', `${skipped} karyawan dari file sudah ada di database.`);
       }
