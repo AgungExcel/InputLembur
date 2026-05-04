@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.0.0';
+  const APP_VERSION = 'online-realtime-1.0.1';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -181,8 +181,19 @@
     };
   }
 
+  function normalizeSupabaseUrl(value) {
+    let url = String(value || '').trim();
+    if (!url) return '';
+    url = url.replace(/\/+$/, '');
+    url = url.replace(/\/rest\/v1$/i, '');
+    url = url.replace(/\/auth\/v1$/i, '');
+    url = url.replace(/\/realtime\/v1$/i, '');
+    url = url.replace(/\/storage\/v1$/i, '');
+    return url;
+  }
+
   function hasSupabaseConfig() {
-    const url = String(cfg.SUPABASE_URL || '').trim();
+    const url = normalizeSupabaseUrl(cfg.SUPABASE_URL);
     const key = String(cfg.SUPABASE_ANON_KEY || '').trim();
     return Boolean(cfg.USE_SUPABASE !== false && url && key && !url.includes('xxxxx') && !key.includes('xxxxx'));
   }
@@ -218,7 +229,9 @@
     migrateOldCache();
     if (hasSupabaseConfig() && window.supabase) {
       try {
-        state.supabase = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+        const supabaseUrl = normalizeSupabaseUrl(cfg.SUPABASE_URL);
+        const supabaseKey = String(cfg.SUPABASE_ANON_KEY || '').trim();
+        state.supabase = window.supabase.createClient(supabaseUrl, supabaseKey, {
           realtime: { params: { eventsPerSecond: 10 } }
         });
         state.onlineMode = true;
@@ -851,9 +864,15 @@
   }
 
   function offlineBanner() {
+    const detail = state.onlineError
+      ? `<div class="mt-2 rounded-2xl bg-white/80 border border-amber-200 px-3 py-2 text-xs text-amber-900"><b>Detail error:</b> ${safe(state.onlineError)}</div>`
+      : '';
+    const cfgHint = hasSupabaseConfig()
+      ? `<div class="mt-2 text-xs">Config sudah terbaca, tetapi koneksi/query Supabase gagal. Cek apakah <b>schema.sql</b> sudah dijalankan dan RLS policy sudah aktif.</div>`
+      : `<div class="mt-2 text-xs">Isi <code class="bg-amber-100 px-1 rounded">config.js</code>, lalu deploy ulang.</div>`;
     return `<div class="bg-amber-50 border border-amber-200 rounded-3xl p-4 flex gap-3 items-start text-amber-800">
       <div class="w-10 h-10 rounded-2xl bg-amber-100 flex items-center justify-center shrink-0">${icon('warning', 'w-5 h-5')}</div>
-      <div class="text-sm leading-6"><b>Mode offline/local aktif.</b> Data hanya tersimpan di browser ini. Agar online realtime, isi <code class="bg-amber-100 px-1 rounded">config.js</code> dengan Supabase URL dan anon key, lalu deploy ulang.</div>
+      <div class="text-sm leading-6"><b>Mode offline/local aktif.</b> Data hanya tersimpan di browser ini. Agar online realtime, SUPABASE_URL harus berupa URL project, contoh <code class="bg-amber-100 px-1 rounded">https://xxxx.supabase.co</code>, bukan URL REST <code class="bg-amber-100 px-1 rounded">/rest/v1</code>.${cfgHint}${detail}</div>
     </div>`;
   }
 
