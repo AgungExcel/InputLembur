@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.6.0';
+  const APP_VERSION = 'online-realtime-1.7.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -1282,9 +1282,12 @@
                   <p class="text-sm text-slate-500">Input Lembur Karyawan - ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
                 </div>
               </div>
-              <div class="flex flex-col sm:flex-row gap-3 sm:items-end">
-                <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-50 to-rose-50 text-red-700 border border-red-200 text-xs font-black hover:shadow-md hover:-translate-y-0.5 transition">${icon('refresh')} Reset Laporan</button>
-                <button id="btnResetDatabase" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-rose-600 to-red-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('database')} Reset Database</button>
+              <div class="flex flex-col xl:flex-row gap-3 xl:items-end xl:justify-end">
+                <div class="flex flex-wrap items-center justify-end gap-2">
+                  <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
+                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                  <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('trash')} Reset Laporan</button>
+                </div>
                 <div>
                   <label class="block text-[10px] uppercase font-black text-slate-400 text-right">Penginput</label>
                   <input id="inputNama" class="w-full sm:w-56 mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" value="${safe(state.namaPenginput)}" placeholder="Nama Anda" />
@@ -1313,11 +1316,8 @@
                   <div id="liveUserTotalsDetails">${userTotalsDetails()}</div>
                 </div>
               </div>
-              <div class="flex flex-wrap items-center gap-2">
-                <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
-                <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
-                <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileLaporan" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
-                <button id="btnBackup" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Backup</button>
+              <div class="hidden xl:block text-right text-[11px] text-slate-400 font-semibold leading-relaxed max-w-sm">
+                Database online realtime aktif. Gunakan <b class="text-slate-600">Update DB Baru</b> hanya untuk menambahkan karyawan yang belum ada.
               </div>
             </div>
           </header>
@@ -1531,14 +1531,11 @@
     });
     byId('btnCloseDb')?.addEventListener('click', () => { state.modalDbOpen = false; render(); });
     byId('btnTemplate')?.addEventListener('click', downloadTemplate);
-    byId('btnBackup')?.addEventListener('click', exportAllBackup);
     byId('btnExport')?.addEventListener('click', exportReport);
     byId('btnSaveQueue')?.addEventListener('click', saveQueue);
     byId('btnClearQueue')?.addEventListener('click', clearQueue);
     byId('btnResetReport')?.addEventListener('click', resetCurrentReport);
-    byId('btnResetDatabase')?.addEventListener('click', resetDatabase);
     byId('fileDb')?.addEventListener('change', e => { importDatabaseFile(e.target.files[0]); e.target.value = ''; });
-    byId('fileLaporan')?.addEventListener('change', e => { importLaporanFile(e.target.files[0]); e.target.value = ''; });
     byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; updateReportView(); });
     byId('filterReportSection')?.addEventListener('change', e => { state.filterReportSection = e.target.value; updateReportView(); });
 
