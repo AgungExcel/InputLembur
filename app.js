@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.1.0';
+  const APP_VERSION = 'online-realtime-1.2.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -47,6 +47,9 @@
     clientId: getSessionId(),
     onlineUsers: [],
     totalLemburAll: 0,
+    totalLemburCurrentUser: 0,
+    totalLemburByUser: [],
+    totalKaryawanAll: 0,
     loading: true,
     syncing: false,
     karyawan: [],
@@ -163,6 +166,31 @@
     const chunks = [];
     for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
     return chunks;
+  }
+
+  async function fetchAllRows(table, select = '*', options = {}) {
+    const pageSize = options.pageSize || 1000;
+    const rows = [];
+    let from = 0;
+    while (true) {
+      let query = state.supabase.from(table).select(select);
+      if (typeof options.filter === 'function') query = options.filter(query);
+      if (options.order) query = query.order(options.order.column, { ascending: options.order.ascending !== false });
+      const { data, error } = await query.range(from, from + pageSize - 1);
+      if (error) throw error;
+      const part = Array.isArray(data) ? data : [];
+      rows.push(...part);
+      if (part.length < pageSize) break;
+      from += pageSize;
+      if (from > 200000) throw new Error(`Data ${table} terlalu besar untuk dimuat sekaligus.`);
+    }
+    return rows;
+  }
+
+  function updateCurrentUserCount() {
+    const name = cleanText(state.namaPenginput) || 'Tanpa Nama';
+    const found = state.totalLemburByUser.find(x => normalizeKey(x.name) === normalizeKey(name));
+    state.totalLemburCurrentUser = found ? found.count : 0;
   }
 
   async function upsertKaryawanRows(rows) {
@@ -313,7 +341,8 @@
         state.onlineReady = true;
         setLS(LS.lastMode, 'online');
         await Promise.all([loadKaryawan(), loadLembur()]);
-        if (!state.karyawan.length) await autoLoadDatabaseXlsx(true);
+        await autoLoadDatabaseXlsx(true, true, false);
+        await loadKaryawan();
         setupRealtime();
       } catch (err) {
         console.error(err);
@@ -337,45 +366,67 @@
 
   async function loadKaryawan() {
     if (!state.onlineMode || !state.supabase) return;
-    const { data, error } = await state.supabase.from('karyawan').select('*').order('nama', { ascending: true });
-    if (error) throw error;
+    const data = await fetchAllRows('karyawan', '*', {
+      order: { column: 'nama', ascending: true }
+    });
     state.karyawan = (data || []).map(dbToAppKaryawan).filter(k => k.id && k.nama);
+    state.totalKaryawanAll = state.karyawan.length;
     setLS(LS.karyawan, state.karyawan);
   }
 
   async function loadLembur(silent = false) {
     if (!state.onlineMode || !state.supabase) return;
     if (!silent) state.syncing = true;
-    const { data, error } = await state.supabase
-      .from('lembur')
-      .select('*')
-      .eq('tanggal', state.inputDate)
-      .order('created_at', { ascending: false });
-    if (!silent) state.syncing = false;
-    if (error) throw error;
-    state.lembur = (data || []).map(dbToAppLembur);
-    const allLocal = getLS(LS.lembur, []);
-    const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => x.tanggal !== state.inputDate) : [];
-    setLS(LS.lembur, [...state.lembur, ...otherDates]);
-    await loadCounts();
-    render();
+    try {
+      const data = await fetchAllRows('lembur', '*', {
+        filter: q => q.eq('tanggal', state.inputDate),
+        order: { column: 'created_at', ascending: false }
+      });
+      state.lembur = (data || []).map(dbToAppLembur);
+      const allLocal = getLS(LS.lembur, []);
+      const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => x.tanggal !== state.inputDate) : [];
+      setLS(LS.lembur, [...state.lembur, ...otherDates]);
+      await loadCounts();
+      render();
+    } finally {
+      if (!silent) state.syncing = false;
+    }
   }
 
   async function loadCounts() {
     try {
+      let lemburForUserTotals = [];
       if (state.onlineMode && state.supabase) {
         const { count, error } = await state.supabase
           .from('lembur')
           .select('id', { count: 'exact', head: true });
         if (error) throw error;
         state.totalLemburAll = Number(count || 0);
+        lemburForUserTotals = await fetchAllRows('lembur', 'penginput', { pageSize: 1000 });
       } else {
         const allLocal = getLS(LS.lembur, []);
-        state.totalLemburAll = Array.isArray(allLocal) ? allLocal.length : state.lembur.length;
+        lemburForUserTotals = Array.isArray(allLocal) ? allLocal : state.lembur;
+        state.totalLemburAll = lemburForUserTotals.length;
       }
+
+      const map = new Map();
+      lemburForUserTotals.forEach(row => {
+        const name = cleanText(row.penginput || row.Inputter || row.Penginput) || 'Tanpa Nama';
+        map.set(name, (map.get(name) || 0) + 1);
+      });
+      state.totalLemburByUser = Array.from(map, ([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+      updateCurrentUserCount();
     } catch (err) {
       console.warn('Gagal mengambil jumlah data:', err);
       state.totalLemburAll = state.lembur.length;
+      const map = new Map();
+      state.lembur.forEach(row => {
+        const name = cleanText(row.penginput) || 'Tanpa Nama';
+        map.set(name, (map.get(name) || 0) + 1);
+      });
+      state.totalLemburByUser = Array.from(map, ([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+      updateCurrentUserCount();
     }
   }
 
@@ -546,6 +597,7 @@
         state.queue = [];
         saveLocalData();
       }
+      await loadCounts();
       toast('success', 'Tersimpan', `${rows.length} data berhasil disimpan.`);
     } catch (err) {
       console.error(err);
@@ -568,6 +620,7 @@
         state.lembur = state.lembur.filter(x => x.id !== id);
         saveLocalData();
       }
+      await loadCounts();
       toast('success', 'Terhapus', 'Data berhasil dihapus.');
       render();
     } catch (err) {
@@ -596,6 +649,7 @@
         state.lembur = state.lembur.map(x => x.id === id ? updated : x);
         saveLocalData();
       }
+      await loadCounts();
       toast('success', 'Diupdate', 'Data lembur berhasil diperbarui.');
       render();
     } catch (err) {
@@ -616,6 +670,7 @@
         saveLocalData();
       }
       state.queue = [];
+      await loadCounts();
       toast('success', 'Reset berhasil', 'Laporan tanggal ini kosong.');
       render();
     } catch (err) {
@@ -657,10 +712,8 @@
       let lemburAll = state.lembur;
 
       if (state.onlineMode && state.supabase) {
-        const { data: dbKaryawan, error: errK } = await state.supabase.from('karyawan').select('*').order('nama', { ascending: true });
-        if (errK) throw errK;
-        const { data: dbLembur, error: errL } = await state.supabase.from('lembur').select('*').order('tanggal', { ascending: false });
-        if (errL) throw errL;
+        const dbKaryawan = await fetchAllRows('karyawan', '*', { order: { column: 'nama', ascending: true } });
+        const dbLembur = await fetchAllRows('lembur', '*', { order: { column: 'tanggal', ascending: false } });
         karyawanAll = (dbKaryawan || []).map(dbToAppKaryawan);
         lemburAll = (dbLembur || []).map(dbToAppLembur);
       } else {
@@ -719,9 +772,6 @@
     // SheetJS tetap menyimpan nilai cache di cell.v; ambil cell.v lebih dulu agar tidak terbaca #NAME?.
     const raw = cleanText(cell.v, true);
     const shown = cleanText(cell.w, true);
-    if (cell.t === 'd' && cell.v instanceof Date) return cleanText(cell.v);
-    // Untuk tanggal Excel numerik, cell.w biasanya berisi format tanggal yang benar.
-    if (cell.t === 'n' && shown && /[\/\-]/.test(shown) && !isExcelErrorText(shown)) return cleanText(shown);
     if (raw && !isExcelErrorText(raw)) return cleanText(raw);
     if (shown && !isExcelErrorText(shown)) return cleanText(shown);
     return '';
@@ -871,46 +921,93 @@
     }
   }
 
-  async function autoLoadDatabaseXlsx(uploadOnline = false, silent = false) {
+  async function fetchDeployedDatabaseWorkbook() {
+    const candidates = [];
+    if (cfg.DATABASE_URL) candidates.push(String(cfg.DATABASE_URL));
+    candidates.push(new URL('database.xlsx', window.location.href).toString());
+    candidates.push(new URL('./database.xlsx', window.location.href).toString());
+    candidates.push(new URL('database.xlsx', window.location.origin + window.location.pathname.replace(/[^/]*$/, '')).toString());
+    candidates.push(new URL('/database.xlsx', window.location.origin).toString());
+
+    const seen = new Set();
+    for (const raw of candidates) {
+      const url = raw.trim();
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      try {
+        const sep = url.includes('?') ? '&' : '?';
+        const res = await fetch(`${url}${sep}v=${encodeURIComponent(APP_VERSION)}&t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) continue;
+        const buf = await res.arrayBuffer();
+        return { wb: XLSX.read(buf, { type: 'array', cellDates: true }), url };
+      } catch (err) {
+        console.warn('Gagal mencoba database.xlsx:', url, err);
+      }
+    }
+    throw new Error('database.xlsx tidak ditemukan. Pastikan file berada satu folder/root dengan index.html. Untuk GitHub Pages, taruh di root repo yang sama dengan index.html.');
+  }
+
+  async function autoLoadDatabaseXlsx(uploadOnline = false, silent = false, force = false) {
     try {
-      if (state.karyawan.length > DEFAULT_DATABASE.length) return;
-      const res = await fetch('database.xlsx', { cache: 'no-store' });
-      if (!res.ok) return;
-      const buf = await res.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array' });
+      const { wb, url } = await fetchDeployedDatabaseWorkbook();
       const rows = sheetRows(wb, ['Karyawan', 'DBLembur', 'DB', 'Database']);
       const parsed = parseKaryawanRows(rows);
-      if (!parsed.length) return;
+      if (!parsed.length) throw new Error('database.xlsx ditemukan, tetapi tidak ada data karyawan valid. Header minimal: ID/Nomor ID dan Nama.');
+
+      if (!force && parsed.length <= state.karyawan.length && state.karyawan.length > DEFAULT_DATABASE.length) {
+        return parsed.length;
+      }
+
       state.karyawan = parsed;
+      state.totalKaryawanAll = parsed.length;
       setLS(LS.karyawan, parsed);
+
       if (uploadOnline && state.onlineMode) {
         await upsertKaryawanRows(parsed);
       }
+
       if (!silent) toast('success', 'Database otomatis dimuat', `${parsed.length} karyawan dari database.xlsx.`);
+      console.info(`Database deploy dimuat dari ${url}: ${parsed.length} karyawan`);
+      return parsed.length;
     } catch (err) {
-      if (!silent) console.warn('Auto load database.xlsx gagal:', err);
+      if (!silent) showInfo('Auto-load database gagal', err.message || String(err), 'warning');
+      else console.warn('Auto load database.xlsx gagal:', err);
+      return 0;
     }
   }
 
-  async function uploadCacheToOnline() {
-    if (!state.onlineMode) return showInfo('Belum online', 'Isi config.js dan deploy ulang dahulu.', 'warning');
-    const ok = await confirmDialog('Upload cache lokal ke online?', 'Data karyawan dan lembur dari cache browser akan dikirim ke Supabase. Data dengan tanggal+ID sama akan diperbarui.', 'Upload', 'Batal', 'warning');
+  async function resetDatabase() {
+    const ok = await confirmDialog(
+      'Reset database karyawan?',
+      'Semua master karyawan di database online akan dihapus. Setelah itu aplikasi akan mencoba memuat ulang database.xlsx yang ikut dideploy. Data lembur/laporan tidak ikut dihapus.',
+      'Reset Database',
+      'Batal',
+      'danger'
+    );
     if (!ok) return;
     try {
-      const karyawan = getLS(LS.karyawan, []);
-      const lembur = getLS(LS.lembur, []);
-      if (Array.isArray(karyawan) && karyawan.length) {
-        await upsertKaryawanRows(karyawan.map(dbToAppKaryawan).filter(k => k.id && k.nama));
-      }
-      if (Array.isArray(lembur) && lembur.length) {
-        await upsertLemburRows(lembur.map(dbToAppLembur));
-      }
-      await Promise.all([loadKaryawan(), loadLembur(true)]);
-      await loadCounts();
-      toast('success', 'Cache berhasil diupload', 'Data lokal sudah masuk ke Supabase.');
+      state.syncing = true;
       render();
+      if (state.onlineMode) {
+        const { error } = await state.supabase.from('karyawan').delete().neq('id', '__never_matches__');
+        if (error) throw error;
+        state.karyawan = [];
+        setLS(LS.karyawan, []);
+        const loaded = await autoLoadDatabaseXlsx(true, false, true);
+        await loadKaryawan();
+        toast('success', 'Database direset', loaded ? `${state.karyawan.length} karyawan aktif di online.` : 'Database online kosong. Silakan klik Update DB.');
+      } else {
+        state.karyawan = [];
+        setLS(LS.karyawan, []);
+        const loaded = await autoLoadDatabaseXlsx(false, false, true);
+        toast('success', 'Database direset', loaded ? `${loaded} karyawan dimuat dari database.xlsx.` : 'Database lokal kosong. Silakan klik Update DB.');
+      }
     } catch (err) {
-      showInfo('Upload cache gagal', err.message || String(err), 'error');
+      console.error(err);
+      showInfo('Reset database gagal', err.message || String(err), 'error');
+    } finally {
+      state.syncing = false;
+      render();
     }
   }
 
@@ -927,6 +1024,23 @@
     const more = names.length > 3 ? ` +${names.length - 3}` : '';
     const title = names.length ? names.join(', ') : 'Menunggu user online';
     return `<span title="${safe(title)}" class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">👥 ${state.onlineUsers.length} Online${preview ? `: ${safe(preview)}${more}` : ''}</span>`;
+  }
+
+  function userTotalsDetails() {
+    const rows = state.totalLemburByUser.slice(0, 12);
+    const body = rows.length
+      ? rows.map((u, idx) => `<div class="flex items-center justify-between gap-4 py-1.5 ${idx ? 'border-t border-slate-100' : ''}"><span class="truncate">${safe(u.name)}</span><b class="text-slate-900">${u.count}</b></div>`).join('')
+      : '<div class="text-slate-400 italic py-2">Belum ada data.</div>';
+    const more = state.totalLemburByUser.length > rows.length ? `<div class="pt-2 text-[10px] text-slate-400">+${state.totalLemburByUser.length - rows.length} user lainnya</div>` : '';
+    return `
+      <details class="relative">
+        <summary class="list-none cursor-pointer select-none"><div class="font-black text-[10px] uppercase text-slate-400">Detail User</div><b class="text-slate-700">${state.totalLemburByUser.length} user</b></summary>
+        <div class="absolute right-0 top-12 z-40 w-72 rounded-2xl bg-white border border-slate-200 shadow-2xl p-4 text-xs">
+          <div class="font-black text-slate-800 mb-2">Total Data Masuk per User</div>
+          ${body}
+          ${more}
+        </div>
+      </details>`;
   }
 
   function render(options = {}) {
@@ -965,8 +1079,8 @@
                 </div>
               </div>
               <div class="flex flex-col sm:flex-row gap-3 sm:items-end">
-                <button id="btnUploadCache" class="${state.onlineMode ? '' : 'hidden'} px-3 py-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs font-bold hover:bg-indigo-100">Upload Cache ke Online</button>
-                <button id="btnResetReport" class="px-3 py-2 rounded-xl bg-red-50 text-red-700 border border-red-200 text-xs font-bold hover:bg-red-100">${icon('refresh')} Reset Laporan</button>
+                <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-50 to-rose-50 text-red-700 border border-red-200 text-xs font-black hover:shadow-md hover:-translate-y-0.5 transition">${icon('refresh')} Reset Laporan</button>
+                <button id="btnResetDatabase" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-rose-600 to-red-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('database')} Reset Database</button>
                 <div>
                   <label class="block text-[10px] uppercase font-black text-slate-400 text-right">Penginput</label>
                   <input id="inputNama" class="w-full sm:w-56 mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" value="${safe(state.namaPenginput)}" placeholder="Nama Anda" />
@@ -989,14 +1103,16 @@
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Worker</div><b class="text-orange-600">${dbStats.worker}</b></div>
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Staff</div><b class="text-purple-600">${dbStats.staff}</b></div>
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Data Masuk</div><b class="text-emerald-600">${state.totalLemburAll}</b></div>
+                  <div><div class="font-black text-[10px] uppercase text-slate-400">Input User Ini</div><b class="text-indigo-600">${state.totalLemburCurrentUser}</b></div>
                   <div><div class="font-black text-[10px] uppercase text-slate-400">User Online</div><b class="text-blue-600">${state.onlineMode ? state.onlineUsers.length : '-'}</b></div>
+                  ${userTotalsDetails()}
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-2">
-                <button id="btnTemplate" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold hover:bg-slate-50">Template DB</button>
-                <label class="px-3 py-2 rounded-xl bg-slate-800 text-white text-xs font-bold hover:bg-slate-900 cursor-pointer inline-flex items-center gap-2">${icon('upload')} Update DB<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
-                <label class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 cursor-pointer inline-flex items-center gap-2">${icon('upload')} Import Data<input id="fileLaporan" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
-                <button id="btnBackup" class="px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold hover:bg-slate-50">Backup</button>
+                <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
+                <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileLaporan" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                <button id="btnBackup" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Backup</button>
               </div>
             </div>
           </header>
@@ -1129,7 +1245,7 @@
   }
 
   function bindEvents() {
-    byId('inputNama')?.addEventListener('input', e => { state.namaPenginput = e.target.value; setLS(LS.nama, state.namaPenginput); schedulePresenceTrack(); });
+    byId('inputNama')?.addEventListener('input', e => { state.namaPenginput = e.target.value; setLS(LS.nama, state.namaPenginput); updateCurrentUserCount(); schedulePresenceTrack(); render({ focus: 'inputNama' }); });
     byId('inputDate')?.addEventListener('change', e => changeDate(e.target.value));
     byId('inputHoliday')?.addEventListener('change', e => { state.isHoliday = e.target.checked; render(); });
     byId('btnOpenDb')?.addEventListener('click', () => {
@@ -1143,7 +1259,7 @@
     byId('btnSaveQueue')?.addEventListener('click', saveQueue);
     byId('btnClearQueue')?.addEventListener('click', clearQueue);
     byId('btnResetReport')?.addEventListener('click', resetCurrentReport);
-    byId('btnUploadCache')?.addEventListener('click', uploadCacheToOnline);
+    byId('btnResetDatabase')?.addEventListener('click', resetDatabase);
     byId('fileDb')?.addEventListener('change', e => { importDatabaseFile(e.target.files[0]); e.target.value = ''; });
     byId('fileLaporan')?.addEventListener('change', e => { importLaporanFile(e.target.files[0]); e.target.value = ''; });
     byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; render({ focus: 'searchReport' }); });
