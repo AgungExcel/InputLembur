@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.5.0';
+  const APP_VERSION = 'online-realtime-1.6.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -191,6 +191,27 @@
     const name = cleanText(state.namaPenginput) || 'Tanpa Nama';
     const found = state.totalLemburByUser.find(x => normalizeKey(x.name) === normalizeKey(name));
     state.totalLemburCurrentUser = found ? found.count : 0;
+  }
+
+  function getUserInputCount(name) {
+    const key = normalizeKey(cleanText(name) || 'Tanpa Nama');
+    const found = state.totalLemburByUser.find(x => normalizeKey(x.name) === key);
+    return found ? Number(found.count || 0) : 0;
+  }
+
+  function getOnlineUserSummary() {
+    const map = new Map();
+    state.onlineUsers.forEach(u => {
+      const name = cleanText(u.name) || 'User';
+      const key = normalizeKey(name);
+      const prev = map.get(key) || { name, sessions: 0, online_at: u.online_at || '' };
+      prev.sessions += 1;
+      if (u.online_at && (!prev.online_at || u.online_at > prev.online_at)) prev.online_at = u.online_at;
+      map.set(key, prev);
+    });
+    return Array.from(map.values())
+      .map(u => ({ ...u, count: getUserInputCount(u.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async function upsertKaryawanRows(rows) {
@@ -513,6 +534,7 @@
       state.totalLemburByUser = Array.from(map, ([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
       updateCurrentUserCount();
+      updateLiveHeader();
     } catch (err) {
       console.warn('Gagal mengambil jumlah data:', err);
       state.totalLemburAll = state.lembur.length;
@@ -523,6 +545,7 @@
       });
       state.totalLemburByUser = Array.from(map, ([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
       updateCurrentUserCount();
+      updateLiveHeader();
     }
   }
 
@@ -533,9 +556,18 @@
 
     state.channelLembur = state.supabase
       .channel('lembur-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'lembur' }, (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lembur' }, async (payload) => {
         const dateChanged = payload.new?.tanggal || payload.old?.tanggal;
-        if (!dateChanged || dateChanged === state.inputDate) loadLembur(true).catch(console.error);
+        try {
+          if (!dateChanged || dateChanged === state.inputDate) {
+            await loadLembur(true);
+          } else {
+            await loadCounts();
+            updateLiveHeader();
+          }
+        } catch (err) {
+          console.error(err);
+        }
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') toast('success', 'Realtime Tersambung', 'Perubahan data akan muncul otomatis.', 2200);
@@ -587,7 +619,7 @@
         });
       });
       state.onlineUsers = users.sort((a, b) => a.name.localeCompare(b.name));
-      if (!state.modalDbOpen) render();
+      if (!updateLiveHeader() && !state.modalDbOpen) render();
     });
 
     state.channelPresence.subscribe((status) => {
@@ -1143,11 +1175,59 @@
 
   function onlineUsersBadge() {
     if (!state.onlineMode) return '';
-    const names = state.onlineUsers.map(u => cleanText(u.name) || 'User');
-    const preview = names.slice(0, 3).join(', ');
-    const more = names.length > 3 ? ` +${names.length - 3}` : '';
-    const title = names.length ? names.join(', ') : 'Menunggu user online';
+    const users = getOnlineUserSummary();
+    const preview = users.slice(0, 3).map(u => `${u.name} (${u.count})`).join(', ');
+    const more = users.length > 3 ? ` +${users.length - 3}` : '';
+    const title = users.length
+      ? users.map(u => `${u.name}: ${u.count} data${u.sessions > 1 ? `, ${u.sessions} tab` : ''}`).join(' | ')
+      : 'Menunggu user online';
     return `<span title="${safe(title)}" class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">👥 ${state.onlineUsers.length} Online${preview ? `: ${safe(preview)}${more}` : ''}</span>`;
+  }
+
+  function onlineUsersDetails() {
+    if (!state.onlineMode) {
+      return `<div><div class="font-black text-[10px] uppercase text-slate-400">User Online</div><b class="text-slate-400">-</b></div>`;
+    }
+    const users = getOnlineUserSummary();
+    const body = users.length
+      ? users.map((u, idx) => `
+          <div class="flex items-center justify-between gap-3 py-2 ${idx ? 'border-t border-slate-100' : ''}">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 font-bold text-slate-800 truncate"><span class="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span><span class="truncate">${safe(u.name)}</span></div>
+              <div class="text-[10px] text-slate-400">${u.sessions > 1 ? `${u.sessions} tab aktif` : 'aktif sekarang'}</div>
+            </div>
+            <div class="text-right shrink-0"><b class="text-blue-700">${u.count}</b><div class="text-[10px] text-slate-400">data</div></div>
+          </div>`).join('')
+      : '<div class="text-slate-400 italic py-2">Belum ada user online.</div>';
+    const inline = users.slice(0, 3).map(u => `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>${safe(u.name)} <b>${u.count}</b></span>`).join('');
+    const more = users.length > 3 ? `<span class="inline-flex items-center px-2 py-1 rounded-full bg-slate-100 text-slate-500">+${users.length - 3}</span>` : '';
+    return `
+      <details class="relative">
+        <summary class="list-none cursor-pointer select-none">
+          <div class="font-black text-[10px] uppercase text-slate-400">User Online</div>
+          <div class="mt-1 flex flex-wrap gap-1 max-w-[360px] text-[10px]">${inline || '<b class="text-blue-600 text-xs">0 online</b>'}${more}</div>
+        </summary>
+        <div class="absolute right-0 top-14 z-40 w-80 rounded-2xl bg-white border border-slate-200 shadow-2xl p-4 text-xs">
+          <div class="flex items-center justify-between mb-2">
+            <div class="font-black text-slate-800">User Online Sekarang</div>
+            <span class="px-2 py-1 rounded-full bg-blue-50 text-blue-700 font-black">${state.onlineUsers.length} online</span>
+          </div>
+          <div class="max-h-72 overflow-auto">${body}</div>
+        </div>
+      </details>`;
+  }
+
+  function updateLiveHeader() {
+    const setText = (id, value) => { const el = byId(id); if (el) el.textContent = value; return !!el; };
+    const setHtml = (id, value) => { const el = byId(id); if (el) el.innerHTML = value; return !!el; };
+    let found = false;
+    found = setText('statDataMasuk', String(state.totalLemburAll)) || found;
+    found = setText('statInputUserIni', String(state.totalLemburCurrentUser)) || found;
+    found = setText('statUserOnline', state.onlineMode ? String(state.onlineUsers.length) : '-') || found;
+    found = setHtml('onlineUsersBadgeWrap', onlineUsersBadge()) || found;
+    found = setHtml('liveOnlineUsersDetails', onlineUsersDetails()) || found;
+    found = setHtml('liveUserTotalsDetails', userTotalsDetails()) || found;
+    return found;
   }
 
   function userTotalsDetails() {
@@ -1197,7 +1277,7 @@
               <div class="flex items-center gap-4">
                 <img src="${safe(getLogoSrc())}" alt="Logo" class="w-16 h-16 rounded-2xl object-contain bg-white border border-slate-200 shadow-sm" />
                 <div>
-                  <div class="flex flex-wrap items-center gap-2 mb-1">${statusBadge()} ${onlineUsersBadge()} ${state.syncing ? '<span class="text-xs text-blue-600 font-bold">Sync...</span>' : ''}</div>
+                  <div class="flex flex-wrap items-center gap-2 mb-1">${statusBadge()} <span id="onlineUsersBadgeWrap">${onlineUsersBadge()}</span> ${state.syncing ? '<span class="text-xs text-blue-600 font-bold">Sync...</span>' : ''}</div>
                   <h1 class="text-2xl md:text-3xl font-black text-slate-900">${safe(cfg.COMPANY_NAME || 'PT Hop Lun Indonesia')}</h1>
                   <p class="text-sm text-slate-500">Input Lembur Karyawan - ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
                 </div>
@@ -1226,10 +1306,11 @@
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Total DB</div><b>${dbStats.total}</b></div>
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Worker</div><b class="text-orange-600">${dbStats.worker}</b></div>
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Staff</div><b class="text-purple-600">${dbStats.staff}</b></div>
-                  <div><div class="font-black text-[10px] uppercase text-slate-400">Data Masuk</div><b class="text-emerald-600">${state.totalLemburAll}</b></div>
-                  <div><div class="font-black text-[10px] uppercase text-slate-400">Input User Ini</div><b class="text-indigo-600">${state.totalLemburCurrentUser}</b></div>
-                  <div><div class="font-black text-[10px] uppercase text-slate-400">User Online</div><b class="text-blue-600">${state.onlineMode ? state.onlineUsers.length : '-'}</b></div>
-                  ${userTotalsDetails()}
+                  <div><div class="font-black text-[10px] uppercase text-slate-400">Data Masuk</div><b id="statDataMasuk" class="text-emerald-600">${state.totalLemburAll}</b></div>
+                  <div><div class="font-black text-[10px] uppercase text-slate-400">Input User Ini</div><b id="statInputUserIni" class="text-indigo-600">${state.totalLemburCurrentUser}</b></div>
+                  <div><div class="font-black text-[10px] uppercase text-slate-400">Online</div><b id="statUserOnline" class="text-blue-600">${state.onlineMode ? state.onlineUsers.length : '-'}</b></div>
+                  <div id="liveOnlineUsersDetails">${onlineUsersDetails()}</div>
+                  <div id="liveUserTotalsDetails">${userTotalsDetails()}</div>
                 </div>
               </div>
               <div class="flex flex-wrap items-center gap-2">
@@ -1435,7 +1516,13 @@
   }
 
   function bindEvents() {
-    byId('inputNama')?.addEventListener('input', e => { state.namaPenginput = e.target.value; setLS(LS.nama, state.namaPenginput); updateCurrentUserCount(); schedulePresenceTrack(); render({ focus: 'inputNama' }); });
+    byId('inputNama')?.addEventListener('input', e => {
+      state.namaPenginput = e.target.value;
+      setLS(LS.nama, state.namaPenginput);
+      updateCurrentUserCount();
+      updateLiveHeader();
+      schedulePresenceTrack();
+    });
     byId('inputDate')?.addEventListener('change', e => changeDate(e.target.value));
     byId('inputHoliday')?.addEventListener('change', e => { state.isHoliday = e.target.checked; render(); });
     byId('btnOpenDb')?.addEventListener('click', () => {
