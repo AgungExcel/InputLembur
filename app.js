@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.2.0';
+  const APP_VERSION = 'online-realtime-1.3.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -387,7 +387,12 @@
       const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => x.tanggal !== state.inputDate) : [];
       setLS(LS.lembur, [...state.lembur, ...otherDates]);
       await loadCounts();
-      render();
+      if (silent && state.modalDbOpen) {
+        updateReportView();
+        updateDbModalList();
+      } else {
+        render();
+      }
     } finally {
       if (!silent) state.syncing = false;
     }
@@ -447,7 +452,9 @@
 
     state.channelKaryawan = state.supabase
       .channel('karyawan-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'karyawan' }, () => loadKaryawan().then(render).catch(console.error))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'karyawan' }, () => loadKaryawan().then(() => {
+        if (state.modalDbOpen) updateDbModalList(); else render();
+      }).catch(console.error))
       .subscribe();
 
     setupPresence();
@@ -489,7 +496,7 @@
         });
       });
       state.onlineUsers = users.sort((a, b) => a.name.localeCompare(b.name));
-      render();
+      if (!state.modalDbOpen) render();
     });
 
     state.channelPresence.subscribe((status) => {
@@ -1146,8 +1153,8 @@
                   <p class="text-sm text-slate-500">${formatDateId(state.inputDate)}</p>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
-                  <div class="flex gap-3 text-xs bg-slate-50 px-3 py-2 rounded-xl border border-slate-100">
-                    <span>Worker: <b>${reportStats.worker}</b></span><span class="w-px bg-slate-200"></span><span>Staff: <b>${reportStats.staff}</b></span><span class="w-px bg-slate-200"></span><span>Total Jam: <b>${reportStats.jam}</b></span>
+                  <div id="reportStatsBox" class="flex gap-3 text-xs bg-slate-50 px-3 py-2 rounded-xl border border-slate-100">
+                    ${renderReportStats(reportStats)}
                   </div>
                   <button id="btnExport" class="px-4 py-2 bg-green-600 text-white rounded-xl text-sm font-bold hover:bg-green-700 flex items-center gap-2">${icon('download')} Download Excel</button>
                 </div>
@@ -1156,11 +1163,11 @@
                 <div class="relative flex-1"><span class="absolute left-3 top-2.5 text-slate-400">${icon('search')}</span><input id="searchReport" class="w-full pl-10 pr-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-green-500" placeholder="Cari nama/ID/section..." value="${safe(state.searchReport)}" /></div>
                 <select id="filterReportSection" class="border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:ring-2 focus:ring-green-500">${getSections(state.lembur).map(s => `<option value="${safe(s)}" ${state.filterReportSection === s ? 'selected' : ''}>${safe(s)}</option>`).join('')}</select>
               </div>
-              <div class="overflow-auto flex-1 border border-slate-200 rounded-2xl">
+              <div id="reportTableBox" class="overflow-auto flex-1 border border-slate-200 rounded-2xl">
                 ${renderReportTable(filteredReport)}
               </div>
               <div class="mt-4 flex flex-wrap justify-between gap-2 text-xs text-slate-500 font-semibold">
-                <span>Menampilkan ${filteredReport.length} data</span>
+                <span id="reportCount">Menampilkan ${filteredReport.length} data</span>
                 <span>Versi aplikasi: ${APP_VERSION}</span>
               </div>
             </section>
@@ -1218,15 +1225,15 @@
             <select id="filterSection" class="border border-slate-200 rounded-xl px-3 py-2 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-500">${sections.map(s => `<option value="${safe(s)}" ${state.filterSection === s ? 'selected' : ''}>${safe(s)}</option>`).join('')}</select>
           </div>
           <div class="flex justify-between items-center gap-2">
-            <button id="btnToggleSelectedView" class="px-3 py-1.5 rounded-full border text-xs font-bold ${state.viewSelectedOnly ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-white border-slate-200 text-slate-600'}">${state.viewSelectedOnly ? 'Tampilkan Semua' : `Lihat Terpilih (${state.selectedIds.size})`}</button>
-            <span class="text-xs text-slate-500">Menampilkan ${display.length} dari ${state.karyawan.length} karyawan</span>
+            <button id="btnToggleSelectedView" class="px-3 py-1.5 rounded-full border text-xs font-bold ${dbToggleButtonClass()}">${dbToggleButtonText()}</button>
+            <span id="dbDisplayCount" class="text-xs text-slate-500">${dbDisplayCountText(display)}</span>
           </div>
         </div>
         <div class="overflow-auto flex-1">
-          <table class="w-full text-sm text-left"><thead class="bg-slate-100 sticky top-0 z-10"><tr><th class="p-3 w-12 text-center"><button id="btnToggleAll" class="text-slate-600">${icon('checkSquare')}</button></th><th class="p-3">ID</th><th class="p-3">Nama</th><th class="p-3">Section</th><th class="p-3">Status</th></tr></thead><tbody class="divide-y">${display.map(k => `<tr class="rowKaryawan cursor-pointer ${state.selectedIds.has(k.id) ? 'bg-blue-50' : 'hover:bg-slate-50'}" data-id="${safe(k.id)}"><td class="p-3 text-center">${state.selectedIds.has(k.id) ? `<span class="text-blue-600">${icon('checkSquare')}</span>` : `<span class="text-slate-300">${icon('square')}</span>`}</td><td class="p-3 font-mono">${safe(k.id)}</td><td class="p-3 font-semibold">${safe(k.nama)}</td><td class="p-3">${safe(k.section)}</td><td class="p-3"><span class="px-2 py-1 rounded-lg border bg-slate-50 text-xs">${safe(k.status)}</span></td></tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Tidak ada data.</td></tr>'}</tbody></table>
+          <table class="w-full text-sm text-left"><thead class="bg-slate-100 sticky top-0 z-10"><tr><th class="p-3 w-12 text-center"><button id="btnToggleAll" class="text-slate-600">${icon('checkSquare')}</button></th><th class="p-3">ID</th><th class="p-3">Nama</th><th class="p-3">Section</th><th class="p-3">Status</th></tr></thead><tbody id="dbTableBody" class="divide-y">${renderDbRows(display)}</tbody></table>
         </div>
         <div class="p-4 border-t border-slate-100 bg-slate-50 flex flex-col xl:flex-row gap-3 xl:items-center xl:justify-between">
-          <span class="text-xs font-black text-slate-500">${state.selectedIds.size} karyawan terpilih</span>
+          <span id="dbSelectedCount" class="text-xs font-black text-slate-500">${state.selectedIds.size} karyawan terpilih</span>
           <div class="flex flex-wrap items-center gap-2">
             <div class="flex items-center bg-white border border-slate-200 rounded-xl px-2 focus-within:ring-2 focus-within:ring-blue-500"><span class="text-xs font-black text-slate-400">Jam</span><input id="batchJam" value="${safe(state.batchJam)}" class="w-20 p-2 text-center font-black outline-none" inputmode="decimal" placeholder="2.5" /></div>
             ${state.isHoliday ? `<div class="flex items-center bg-white border border-slate-200 rounded-xl px-2"><span class="text-xs font-black text-slate-400">Shift</span><select id="batchShift" class="p-2 text-sm outline-none bg-white"><option ${state.batchShift === 'Pagi' ? 'selected' : ''}>Pagi</option><option ${state.batchShift === 'Siang' ? 'selected' : ''}>Siang</option><option ${state.batchShift === 'Normal' ? 'selected' : ''}>Normal</option></select></div>` : ''}
@@ -1236,6 +1243,72 @@
         </div>
       </div>
     </div>`;
+  }
+
+
+  function renderReportStats(stats) {
+    return `<span>Worker: <b>${stats.worker}</b></span><span class="w-px bg-slate-200"></span><span>Staff: <b>${stats.staff}</b></span><span class="w-px bg-slate-200"></span><span>Total Jam: <b>${stats.jam}</b></span>`;
+  }
+
+  function updateReportView() {
+    const filteredReport = getFilteredReport();
+    const stats = {
+      worker: filteredReport.filter(i => normalizeStatus(i.status) === 'Worker').length,
+      staff: filteredReport.filter(i => normalizeStatus(i.status) === 'Staff').length,
+      jam: filteredReport.reduce((acc, x) => acc + (Number(String(x.jam).replace(',', '.')) || 0), 0)
+    };
+    const statsBox = byId('reportStatsBox');
+    const tableBox = byId('reportTableBox');
+    const count = byId('reportCount');
+    if (statsBox) statsBox.innerHTML = renderReportStats(stats);
+    if (tableBox) tableBox.innerHTML = renderReportTable(filteredReport);
+    if (count) count.textContent = `Menampilkan ${filteredReport.length} data`;
+    bindReportRowEvents();
+  }
+
+  function bindReportRowEvents() {
+    document.querySelectorAll('.btnDelete').forEach(btn => btn.addEventListener('click', () => deleteLembur(btn.dataset.id)));
+    document.querySelectorAll('.btnEdit').forEach(btn => btn.addEventListener('click', () => editLembur(btn.dataset.id)));
+  }
+
+  function dbToggleButtonClass() {
+    return state.viewSelectedOnly ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-white border-slate-200 text-slate-600';
+  }
+
+  function dbToggleButtonText() {
+    return state.viewSelectedOnly ? 'Tampilkan Semua' : `Lihat Terpilih (${state.selectedIds.size})`;
+  }
+
+  function dbDisplayCountText(display = getDisplayDb()) {
+    return `Menampilkan ${display.length} dari ${state.karyawan.length} karyawan`;
+  }
+
+  function renderDbRows(display) {
+    return display.map(k => `<tr class="rowKaryawan cursor-pointer ${state.selectedIds.has(k.id) ? 'bg-blue-50' : 'hover:bg-slate-50'}" data-id="${safe(k.id)}"><td class="p-3 text-center">${state.selectedIds.has(k.id) ? `<span class="text-blue-600">${icon('checkSquare')}</span>` : `<span class="text-slate-300">${icon('square')}</span>`}</td><td class="p-3 font-mono">${safe(k.id)}</td><td class="p-3 font-semibold">${safe(k.nama)}</td><td class="p-3">${safe(k.section)}</td><td class="p-3"><span class="px-2 py-1 rounded-lg border bg-slate-50 text-xs">${safe(k.status)}</span></td></tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Tidak ada data.</td></tr>';
+  }
+
+  function updateDbModalList() {
+    const display = getDisplayDb();
+    const tableBody = byId('dbTableBody');
+    const displayCount = byId('dbDisplayCount');
+    const selectedCount = byId('dbSelectedCount');
+    const toggleBtn = byId('btnToggleSelectedView');
+    if (tableBody) tableBody.innerHTML = renderDbRows(display);
+    if (displayCount) displayCount.textContent = dbDisplayCountText(display);
+    if (selectedCount) selectedCount.textContent = `${state.selectedIds.size} karyawan terpilih`;
+    if (toggleBtn) {
+      toggleBtn.textContent = dbToggleButtonText();
+      toggleBtn.className = `px-3 py-1.5 rounded-full border text-xs font-bold ${dbToggleButtonClass()}`;
+    }
+    bindDbRowEvents();
+  }
+
+  function bindDbRowEvents() {
+    document.querySelectorAll('.rowKaryawan').forEach(row => row.addEventListener('click', () => {
+      const id = row.dataset.id;
+      if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
+      updateDbModalList();
+    }));
   }
 
   function codePill(code) {
@@ -1262,34 +1335,32 @@
     byId('btnResetDatabase')?.addEventListener('click', resetDatabase);
     byId('fileDb')?.addEventListener('change', e => { importDatabaseFile(e.target.files[0]); e.target.value = ''; });
     byId('fileLaporan')?.addEventListener('change', e => { importLaporanFile(e.target.files[0]); e.target.value = ''; });
-    byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; render({ focus: 'searchReport' }); });
-    byId('filterReportSection')?.addEventListener('change', e => { state.filterReportSection = e.target.value; render(); });
+    byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; updateReportView(); });
+    byId('filterReportSection')?.addEventListener('change', e => { state.filterReportSection = e.target.value; updateReportView(); });
 
     if (state.modalDbOpen) {
-      byId('searchDb')?.addEventListener('input', e => { state.searchDb = e.target.value; state.viewSelectedOnly = false; render({ focus: 'searchDb' }); });
+      byId('searchDb')?.addEventListener('input', e => { state.searchDb = e.target.value; state.viewSelectedOnly = false; updateDbModalList(); });
       byId('searchDb')?.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
           e.preventDefault();
           const first = getDisplayDb()[0];
           if (first) state.selectedIds.add(first.id);
           state.searchDb = '';
-          render({ focus: 'searchDb' });
+          const searchEl = byId('searchDb');
+          if (searchEl) searchEl.value = '';
+          updateDbModalList();
         }
       });
-      byId('filterSection')?.addEventListener('change', e => { state.filterSection = e.target.value; render(); });
-      byId('btnToggleSelectedView')?.addEventListener('click', () => { state.viewSelectedOnly = !state.viewSelectedOnly; render(); });
+      byId('filterSection')?.addEventListener('change', e => { state.filterSection = e.target.value; updateDbModalList(); });
+      byId('btnToggleSelectedView')?.addEventListener('click', () => { state.viewSelectedOnly = !state.viewSelectedOnly; updateDbModalList(); });
       byId('btnToggleAll')?.addEventListener('click', () => {
         const display = getDisplayDb();
         const allSelected = display.length && display.every(k => state.selectedIds.has(k.id));
         if (allSelected) display.forEach(k => state.selectedIds.delete(k.id));
         else display.forEach(k => state.selectedIds.add(k.id));
-        render();
+        updateDbModalList();
       });
-      document.querySelectorAll('.rowKaryawan').forEach(row => row.addEventListener('click', () => {
-        const id = row.dataset.id;
-        if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
-        render();
-      }));
+      bindDbRowEvents();
       byId('batchJam')?.addEventListener('input', e => { state.batchJam = e.target.value; });
       byId('batchJam')?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addQueue(); } });
       byId('batchPinjam')?.addEventListener('input', e => { state.batchPinjam = e.target.value; });
@@ -1301,8 +1372,7 @@
       state.queue = state.queue.filter(q => q.tempId !== btn.dataset.id);
       render();
     }));
-    document.querySelectorAll('.btnDelete').forEach(btn => btn.addEventListener('click', () => deleteLembur(btn.dataset.id)));
-    document.querySelectorAll('.btnEdit').forEach(btn => btn.addEventListener('click', () => editLembur(btn.dataset.id)));
+    bindReportRowEvents();
   }
 
   function byId(id) { return document.getElementById(id); }
