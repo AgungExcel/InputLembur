@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.3.0';
+  const APP_VERSION = 'online-realtime-1.4.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -199,6 +199,44 @@
       const { error } = await state.supabase.from('karyawan').upsert(payload, { onConflict: 'id' });
       if (error) throw error;
     }
+  }
+
+  async function insertMissingKaryawanRows(rows) {
+    // Dipakai oleh tombol Update DB: hanya menambahkan ID yang belum ada.
+    // Data lama tidak ditimpa, sehingga proses jauh lebih cepat untuk update harian.
+    if (!rows.length) return;
+    for (const part of chunkArray(rows, 500)) {
+      const payload = part.map(k => ({ id: k.id, nama: k.nama, section: k.section || '', status: normalizeStatus(k.status) }));
+      const { error } = await state.supabase.from('karyawan').upsert(payload, { onConflict: 'id', ignoreDuplicates: true });
+      if (error) throw error;
+    }
+  }
+
+  function splitNewKaryawanRows(parsedRows, existingRows) {
+    const existingIds = new Set((existingRows || []).map(k => String(k.id || '').trim()).filter(Boolean));
+    const baru = [];
+    const sudahAda = [];
+    parsedRows.forEach(k => {
+      if (existingIds.has(String(k.id))) sudahAda.push(k);
+      else baru.push(k);
+    });
+    return { baru, sudahAda };
+  }
+
+  function mergeKaryawanTambahBaru(existingRows, parsedRows) {
+    const map = new Map((existingRows || []).map(k => [String(k.id), k]));
+    let added = 0;
+    parsedRows.forEach(k => {
+      if (!map.has(String(k.id))) {
+        map.set(String(k.id), k);
+        added += 1;
+      }
+    });
+    return {
+      rows: Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama)),
+      added,
+      skipped: Math.max(parsedRows.length - added, 0)
+    };
   }
 
   async function upsertLemburRows(rows) {
@@ -879,25 +917,44 @@
   async function importDatabaseFile(file) {
     if (!file) return;
     try {
+      state.syncing = true;
+      render();
       const wb = await parseSheet(file);
       const rows = sheetRows(wb, ['Karyawan', 'DBLembur', 'DB', 'Database']);
       const parsed = parseKaryawanRows(rows);
       if (!parsed.length) return showInfo('Import database gagal', `Tidak ada data karyawan valid. Header yang didukung: ID/Nomor ID, Nama, Section/SECTION, Status/STATUS. Baris terbaca: ${rows.length}.`, 'error');
+
+      let added = 0;
+      let skipped = 0;
+
       if (state.onlineMode) {
-        await upsertKaryawanRows(parsed);
+        await loadKaryawan();
+        const split = splitNewKaryawanRows(parsed, state.karyawan);
+        added = split.baru.length;
+        skipped = split.sudahAda.length;
+        if (added) await insertMissingKaryawanRows(split.baru);
         await loadKaryawan();
         await loadCounts();
       } else {
-        const map = new Map(state.karyawan.map(k => [k.id, k]));
-        parsed.forEach(k => map.set(k.id, k));
-        state.karyawan = Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama));
+        const merged = mergeKaryawanTambahBaru(state.karyawan, parsed);
+        state.karyawan = merged.rows;
+        added = merged.added;
+        skipped = merged.skipped;
         saveLocalData();
       }
-      toast('success', 'Database diimport', `${parsed.length} karyawan berhasil disimpan.`);
+
+      if (added) {
+        toast('success', 'Database ditambah', `${added} karyawan baru masuk. ${skipped} sudah ada dan dilewati.`);
+      } else {
+        toast('info', 'Tidak ada data baru', `${skipped} karyawan dari file sudah ada di database.`);
+      }
       render();
     } catch (err) {
       console.error(err);
       showInfo('Import database gagal', err.message || String(err), 'error');
+    } finally {
+      state.syncing = false;
+      render();
     }
   }
 
@@ -961,20 +1018,34 @@
       const parsed = parseKaryawanRows(rows);
       if (!parsed.length) throw new Error('database.xlsx ditemukan, tetapi tidak ada data karyawan valid. Header minimal: ID/Nomor ID dan Nama.');
 
-      if (!force && parsed.length <= state.karyawan.length && state.karyawan.length > DEFAULT_DATABASE.length) {
+      if (uploadOnline && state.onlineMode) {
+        await loadKaryawan();
+        if (!force && parsed.length <= state.karyawan.length && state.karyawan.length > DEFAULT_DATABASE.length) {
+          console.info(`Database deploy dicek dari ${url}: tidak ada penambahan wajib.`);
+          return parsed.length;
+        }
+        const split = splitNewKaryawanRows(parsed, state.karyawan);
+        if (split.baru.length) await insertMissingKaryawanRows(split.baru);
+        await loadKaryawan();
+        if (!silent) {
+          const msg = split.baru.length
+            ? `${split.baru.length} karyawan baru ditambahkan dari database.xlsx. ${split.sudahAda.length} sudah ada.`
+            : `${split.sudahAda.length} karyawan dari database.xlsx sudah ada. Tidak ada data baru.`;
+          toast(split.baru.length ? 'success' : 'info', 'Auto-load database', msg);
+        }
+        console.info(`Database deploy dicek dari ${url}: ${split.baru.length} baru, ${split.sudahAda.length} sudah ada`);
         return parsed.length;
       }
 
-      state.karyawan = parsed;
-      state.totalKaryawanAll = parsed.length;
-      setLS(LS.karyawan, parsed);
+      const merged = force || state.karyawan.length <= DEFAULT_DATABASE.length
+        ? { rows: parsed, added: parsed.length, skipped: 0 }
+        : mergeKaryawanTambahBaru(state.karyawan, parsed);
+      state.karyawan = merged.rows;
+      state.totalKaryawanAll = merged.rows.length;
+      setLS(LS.karyawan, merged.rows);
 
-      if (uploadOnline && state.onlineMode) {
-        await upsertKaryawanRows(parsed);
-      }
-
-      if (!silent) toast('success', 'Database otomatis dimuat', `${parsed.length} karyawan dari database.xlsx.`);
-      console.info(`Database deploy dimuat dari ${url}: ${parsed.length} karyawan`);
+      if (!silent) toast('success', 'Database otomatis dimuat', `${merged.added} karyawan baru dari database.xlsx.`);
+      console.info(`Database deploy dimuat dari ${url}: ${merged.added} baru, ${merged.skipped || 0} sudah ada`);
       return parsed.length;
     } catch (err) {
       if (!silent) showInfo('Auto-load database gagal', err.message || String(err), 'warning');
@@ -1117,7 +1188,7 @@
               </div>
               <div class="flex flex-wrap items-center gap-2">
                 <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
-                <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
                 <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileLaporan" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
                 <button id="btnBackup" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Backup</button>
               </div>
