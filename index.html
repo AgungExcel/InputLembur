@@ -412,32 +412,112 @@ const FEEDBACK_STYLES = {
     danger: { iconBg: 'bg-red-100', iconText: 'text-red-600', button: 'bg-red-600 hover:bg-red-700', ring: 'ring-red-100', toast: 'bg-red-600', border: 'border-red-100' },
     info: { iconBg: 'bg-blue-100', iconText: 'text-blue-600', button: 'bg-blue-600 hover:bg-blue-700', ring: 'ring-blue-100', toast: 'bg-blue-600', border: 'border-blue-100' }
 };
+const STORAGE_KEYS = {
+    db: [
+        'hoplun_db_karyawan_v3',
+        'dbKaryawan_v2',
+        'dbKaryawan',
+        'dbKaryawan_v1',
+        'databaseKaryawan'
+    ],
+    laporan: [
+        'hoplun_data_lembur_v3',
+        'dataLembur_temp',
+        'dataLembur',
+        'dataLembur_v2',
+        'laporanLembur'
+    ],
+    penginput: [
+        'hoplun_nama_penginput_v3',
+        'namaPenginput',
+        'inputterLembur'
+    ]
+};
+const safeJsonParse = (raw) => {
+    try {
+        return raw ? JSON.parse(raw) : null;
+    }
+    catch (_a) {
+        return null;
+    }
+};
+const readStorageValue = (keys, fallback) => {
+    if (typeof window === 'undefined' || !window.localStorage) {
+        return { value: fallback, key: null, found: false };
+    }
+    for (const key of keys) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (!raw)
+                continue;
+            const parsed = safeJsonParse(raw);
+            if (Array.isArray(parsed)) {
+                return { value: parsed, key, found: true };
+            }
+            if (typeof parsed === 'string' && parsed.trim()) {
+                return { value: parsed, key, found: true };
+            }
+            if (raw && raw.trim() && !raw.trim().startsWith('[') && !raw.trim().startsWith('{')) {
+                return { value: raw, key, found: true };
+            }
+        }
+        catch (err) {
+            console.warn(`Gagal membaca cache ${key}:`, err);
+        }
+    }
+    return { value: fallback, key: null, found: false };
+};
+const writeStorageValue = (keys, value) => {
+    if (typeof window === 'undefined' || !window.localStorage)
+        return false;
+    let ok = false;
+    for (const key of keys) {
+        try {
+            localStorage.setItem(key, JSON.stringify(value));
+            ok = true;
+        }
+        catch (err) {
+            console.warn(`Gagal menyimpan cache ${key}:`, err);
+        }
+    }
+    return ok;
+};
+const removeStorageValue = (keys) => {
+    if (typeof window === 'undefined' || !window.localStorage)
+        return;
+    for (const key of keys) {
+        try {
+            localStorage.removeItem(key);
+        }
+        catch (err) {
+            console.warn(`Gagal menghapus cache ${key}:`, err);
+        }
+    }
+};
 // --- APP COMPONENT ---
 const App = () => {
     // STATE
-    const [dbKaryawan, setDbKaryawan] = useState(() => {
-        try {
-            const saved = localStorage.getItem('dbKaryawan_v2');
-            return saved ? JSON.parse(saved) : DEFAULT_DATABASE;
+    const [initialDbCache] = useState(() => readStorageValue(STORAGE_KEYS.db, DEFAULT_DATABASE));
+    const [initialLaporanCache] = useState(() => readStorageValue(STORAGE_KEYS.laporan, []));
+    const [initialPenginputCache] = useState(() => readStorageValue(STORAGE_KEYS.penginput, ''));
+    const [dbKaryawan, setDbKaryawan] = useState(() => Array.isArray(initialDbCache.value) && initialDbCache.value.length ? initialDbCache.value : DEFAULT_DATABASE);
+    const [dbLoadInfo, setDbLoadInfo] = useState(() => {
+        if (initialDbCache.found && Array.isArray(initialDbCache.value) && initialDbCache.value.length) {
+            return `DB dari cache browser: ${initialDbCache.value.length} karyawan`;
         }
-        catch (_a) {
-            return DEFAULT_DATABASE;
-        }
+        return 'Memuat database otomatis...';
     });
-    const [dbLoadInfo, setDbLoadInfo] = useState('Memuat database otomatis...');
+    const [cacheInfo, setCacheInfo] = useState(() => {
+        if (initialLaporanCache.found && Array.isArray(initialLaporanCache.value) && initialLaporanCache.value.length) {
+            return `Cache browser dipulihkan: ${initialLaporanCache.value.length} data lembur`;
+        }
+        return 'Cache browser siap menyimpan data otomatis';
+    });
     const [inputDate, setInputDate] = useState(new Date().toISOString().split('T')[0]);
     const [isHoliday, setIsHoliday] = useState(false);
-    const [namaPenginput, setNamaPenginput] = useState('');
+    const [namaPenginput, setNamaPenginput] = useState(() => typeof initialPenginputCache.value === 'string' ? initialPenginputCache.value : '');
     const [queueLembur, setQueueLembur] = useState([]);
-    const [dataLembur, setDataLembur] = useState(() => {
-        try {
-            const saved = localStorage.getItem('dataLembur_temp');
-            return saved ? JSON.parse(saved) : [];
-        }
-        catch (_a) {
-            return [];
-        }
-    });
+    const [dataLembur, setDataLembur] = useState(() => Array.isArray(initialLaporanCache.value) ? initialLaporanCache.value : []);
     const [toast, setToast] = useState(null);
     const [dialog, setDialog] = useState(null);
     const [editingItem, setEditingItem] = useState(null);
@@ -517,13 +597,19 @@ const App = () => {
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [dialog, closeDialog]);
     useEffect(() => {
-        try {
-            localStorage.setItem('dataLembur_temp', JSON.stringify(dataLembur));
+        const saved = writeStorageValue(STORAGE_KEYS.laporan, dataLembur);
+        if (saved) {
+            setCacheInfo(dataLembur.length
+                ? `Cache browser aktif: ${dataLembur.length} data lembur tersimpan otomatis`
+                : 'Cache browser siap menyimpan data otomatis');
         }
-        catch (err) {
-            console.warn('Gagal menyimpan data sementara:', err);
+        else {
+            setCacheInfo('Cache browser tidak bisa disimpan. Cek izin browser/private mode.');
         }
     }, [dataLembur]);
+    useEffect(() => {
+        writeStorageValue(STORAGE_KEYS.penginput, namaPenginput || '');
+    }, [namaPenginput]);
     useEffect(() => {
         let cancelled = false;
         const autoLoadDatabase = async () => {
@@ -547,7 +633,7 @@ const App = () => {
                         if (cancelled)
                             return;
                         setDbKaryawan(parsed);
-                        localStorage.setItem('dbKaryawan_v2', JSON.stringify(parsed));
+                        writeStorageValue(STORAGE_KEYS.db, parsed);
                         setDbLoadInfo(`DB otomatis: ${filename} (${parsed.length} karyawan)`);
                         return;
                     }
@@ -557,7 +643,7 @@ const App = () => {
                 }
             }
             if (!cancelled) {
-                setDbLoadInfo('DB otomatis belum ditemukan di folder HTML. Nama yang dicari: database.xlsx / db_karyawan.xlsx / DB.xlsx / karyawan.xlsx.');
+                setDbLoadInfo(initialDbCache.found ? `DB tetap memakai cache browser (${dbKaryawan.length} karyawan). File database.xlsx belum ditemukan di server.` : 'DB otomatis belum ditemukan di folder HTML. Nama yang dicari: database.xlsx / db_karyawan.xlsx / DB.xlsx / karyawan.xlsx.');
             }
         };
         autoLoadDatabase();
@@ -615,7 +701,7 @@ const App = () => {
             return;
         setDataLembur([]);
         setQueueLembur([]);
-        localStorage.removeItem('dataLembur_temp');
+        removeStorageValue(STORAGE_KEYS.laporan);
         showToast('Data berhasil di-reset.', 'success');
     };
     const handleEditClick = (item) => {
@@ -741,7 +827,7 @@ const App = () => {
                 return;
             }
             setDbKaryawan(newDb);
-            localStorage.setItem('dbKaryawan_v2', JSON.stringify(newDb));
+            writeStorageValue(STORAGE_KEYS.db, newDb);
             setDbLoadInfo(`DB aktif: ${newDb.length} karyawan dari ${file.name}`);
             showToast(`Database diperbarui: ${newDb.length} karyawan.`, 'success');
         }
@@ -774,6 +860,28 @@ const App = () => {
         window.XLSX.utils.book_append_sheet(wb, ws, "Laporan");
         window.XLSX.writeFile(wb, `Lembur_${inputDate}.xlsx`);
         showToast('File laporan berhasil didownload.', 'success');
+    };
+    const handleBackupCache = () => {
+        if (!window.XLSX)
+            return showAlert('Sistem Excel belum siap. Coba refresh halaman.', { title: 'Excel Belum Siap', type: 'warning' });
+        if (!dataLembur.length)
+            return showAlert('Belum ada data lembur di cache browser untuk dibackup.', { title: 'Cache Kosong', type: 'info' });
+        const ws = window.XLSX.utils.json_to_sheet(dataLembur.map(r => ({
+            "Tanggal": r.tanggal,
+            "Inputter": r.penginput,
+            "ID": r.karyawanId,
+            "Nama": r.nama,
+            "Section": r.section,
+            "Status": r.status,
+            "Jam": r.jam,
+            "Kode": r.kode,
+            "Pinjam": r.pinjam,
+            "Shift": r.shift
+        })));
+        const wb = window.XLSX.utils.book_new();
+        window.XLSX.utils.book_append_sheet(wb, ws, "Laporan");
+        window.XLSX.writeFile(wb, `Backup_Cache_Lembur_${new Date().toISOString().split('T')[0]}.xlsx`);
+        showToast('Backup cache berhasil didownload.', 'success');
     };
     const handleImportLaporan = async (e) => {
         const file = e.target.files && e.target.files[0];
@@ -1131,15 +1239,22 @@ const App = () => {
                             "| ",
                             new Date(inputDate).toLocaleDateString('id-ID', { dateStyle: 'long' }))),
                     React.createElement("div", { className: "flex flex-col md:flex-row gap-3 items-end md:items-center w-full md:w-auto" },
-                        React.createElement("div", { className: "flex gap-3 text-xs bg-slate-50 px-3 py-1.5 rounded border border-slate-100" },
-                            React.createElement("div", { className: "flex items-center gap-1" },
-                                React.createElement("span", { className: "text-slate-400" }, "Worker:"),
-                                React.createElement("span", { className: "font-bold text-slate-700" }, reportStats.worker)),
-                            React.createElement("div", { className: "w-px h-4 bg-slate-200" }),
-                            React.createElement("div", { className: "flex items-center gap-1" },
-                                React.createElement("span", { className: "text-slate-400" }, "Staff:"),
-                                React.createElement("span", { className: "font-bold text-slate-700" }, reportStats.staff))),
-                        React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("div", { className: "flex flex-col gap-1" },
+                            React.createElement("div", { className: "flex gap-3 text-xs bg-slate-50 px-3 py-1.5 rounded border border-slate-100" },
+                                React.createElement("div", { className: "flex items-center gap-1" },
+                                    React.createElement("span", { className: "text-slate-400" }, "Worker:"),
+                                    React.createElement("span", { className: "font-bold text-slate-700" }, reportStats.worker)),
+                                React.createElement("div", { className: "w-px h-4 bg-slate-200" }),
+                                React.createElement("div", { className: "flex items-center gap-1" },
+                                    React.createElement("span", { className: "text-slate-400" }, "Staff:"),
+                                    React.createElement("span", { className: "font-bold text-slate-700" }, reportStats.staff))),
+                            React.createElement("div", { className: "text-[10px] text-slate-500 bg-blue-50 border border-blue-100 rounded px-2 py-1 flex items-center gap-1 max-w-[360px]" },
+                                React.createElement(Icons.Database, { size: 12 }),
+                                React.createElement("span", { className: "truncate", title: cacheInfo }, cacheInfo))),
+                        React.createElement("div", { className: "flex gap-2 flex-wrap justify-end" },
+                            React.createElement("button", { onClick: handleBackupCache, className: "text-sm bg-slate-700 hover:bg-slate-800 text-white py-1.5 px-4 rounded-lg gap-2 flex transition shadow-sm font-medium" },
+                                React.createElement(Icons.Database, { size: 16 }),
+                                " Backup Cache"),
                             React.createElement("label", { htmlFor: "laporan-import", className: "cursor-pointer text-sm bg-blue-600 hover:bg-blue-700 text-white py-1.5 px-4 rounded-lg gap-2 flex transition shadow-sm font-medium" },
                                 React.createElement(Icons.Upload, { size: 16 }),
                                 " Import Data"),
