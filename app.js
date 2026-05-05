@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.7.0';
+  const APP_VERSION = 'online-realtime-1.9.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -58,6 +58,9 @@
     selectedIds: new Set(),
     viewSelectedOnly: false,
     inputDate: todayISO(),
+    dateRangeMode: false,
+    rangeStart: todayISO(),
+    rangeEnd: todayISO(),
     isHoliday: isWeekend(todayISO()),
     namaPenginput: getLS(LS.nama, ''),
     searchDb: '',
@@ -298,6 +301,35 @@
     } catch { return dateStr; }
   }
 
+  function validDateOrToday(dateStr) {
+    const value = String(dateStr || '').slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : todayISO();
+  }
+
+  function orderedDates(start, end) {
+    const a = validDateOrToday(start);
+    const b = validDateOrToday(end);
+    return a <= b ? { start: a, end: b } : { start: b, end: a };
+  }
+
+  function getReportScope() {
+    if (!state.dateRangeMode) return { start: state.inputDate, end: state.inputDate, range: false };
+    const dates = orderedDates(state.rangeStart || state.inputDate, state.rangeEnd || state.inputDate);
+    return { ...dates, range: true };
+  }
+
+  function isDateInReportScope(dateStr) {
+    const date = validDateOrToday(dateStr);
+    const scope = getReportScope();
+    return scope.range ? (date >= scope.start && date <= scope.end) : date === scope.start;
+  }
+
+  function reportScopeLabel() {
+    const scope = getReportScope();
+    if (!scope.range || scope.start === scope.end) return formatDateId(scope.start);
+    return `${formatDateId(scope.start)} s/d ${formatDateId(scope.end)}`;
+  }
+
   function normalizeStatus(value) {
     const v = String(value || '').trim();
     if (!v) return 'Worker';
@@ -414,12 +446,12 @@
     const karyawan = getLS(LS.karyawan, null);
     const lembur = getLS(LS.lembur, null);
     state.karyawan = Array.isArray(karyawan) && karyawan.length ? sanitizeKaryawanRows(karyawan) : DEFAULT_DATABASE;
-    state.lembur = Array.isArray(lembur) ? lembur.map(dbToAppLembur).filter(x => x.tanggal === state.inputDate) : [];
+    state.lembur = Array.isArray(lembur) ? lembur.map(dbToAppLembur).filter(x => isDateInReportScope(x.tanggal)) : [];
   }
 
   function saveLocalData() {
     const allLocal = getLS(LS.lembur, []);
-    const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => x.tanggal !== state.inputDate) : [];
+    const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => !isDateInReportScope(x.tanggal)) : [];
     setLS(LS.karyawan, state.karyawan);
     setLS(LS.lembur, [...state.lembur, ...otherDates]);
     setLS(LS.nama, state.namaPenginput || '');
@@ -490,13 +522,14 @@
     if (!state.onlineMode || !state.supabase) return;
     if (!silent) state.syncing = true;
     try {
+      const scope = getReportScope();
       const data = await fetchAllRows('lembur', '*', {
-        filter: q => q.eq('tanggal', state.inputDate),
+        filter: q => scope.range ? q.gte('tanggal', scope.start).lte('tanggal', scope.end) : q.eq('tanggal', scope.start),
         order: { column: 'created_at', ascending: false }
       });
       state.lembur = (data || []).map(dbToAppLembur);
       const allLocal = getLS(LS.lembur, []);
-      const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => x.tanggal !== state.inputDate) : [];
+      const otherDates = Array.isArray(allLocal) ? allLocal.filter(x => !isDateInReportScope(x.tanggal)) : [];
       setLS(LS.lembur, [...state.lembur, ...otherDates]);
       await loadCounts();
       if (silent && state.modalDbOpen) {
@@ -559,7 +592,7 @@
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lembur' }, async (payload) => {
         const dateChanged = payload.new?.tanggal || payload.old?.tanggal;
         try {
-          if (!dateChanged || dateChanged === state.inputDate) {
+          if (!dateChanged || isDateInReportScope(dateChanged)) {
             await loadLembur(true);
           } else {
             await loadCounts();
@@ -627,14 +660,39 @@
     });
   }
 
-  async function changeDate(date) {
-    state.inputDate = date;
-    state.isHoliday = isWeekend(date);
+  async function refreshReportScope() {
     state.filterReportSection = 'All';
     state.searchReport = '';
     if (state.onlineMode) await loadLembur();
     else loadLocalData();
     render();
+  }
+
+  async function changeDate(date) {
+    state.inputDate = validDateOrToday(date);
+    state.isHoliday = isWeekend(state.inputDate);
+    if (!state.dateRangeMode) {
+      state.rangeStart = state.inputDate;
+      state.rangeEnd = state.inputDate;
+      await refreshReportScope();
+    } else {
+      render();
+    }
+  }
+
+  async function toggleDateRangeMode(enabled) {
+    state.dateRangeMode = Boolean(enabled);
+    if (!state.rangeStart) state.rangeStart = state.inputDate;
+    if (!state.rangeEnd) state.rangeEnd = state.inputDate;
+    await refreshReportScope();
+  }
+
+  async function changeReportRange(which, value) {
+    const date = validDateOrToday(value);
+    if (which === 'start') state.rangeStart = date;
+    else state.rangeEnd = date;
+    state.dateRangeMode = true;
+    await refreshReportScope();
   }
 
   function getFilteredDb() {
@@ -655,7 +713,7 @@
     return state.lembur.filter(i => {
       const matchQ = !q || String(i.nama).toLowerCase().includes(q) || String(i.karyawanId).toLowerCase().includes(q) || String(i.section).toLowerCase().includes(q);
       const matchS = state.filterReportSection === 'All' || i.section === state.filterReportSection;
-      return i.tanggal === state.inputDate && matchQ && matchS;
+      return isDateInReportScope(i.tanggal) && matchQ && matchS;
     });
   }
 
@@ -666,7 +724,7 @@
 
   function checkDuplicate(karyawanId) {
     const id = String(karyawanId);
-    return state.lembur.some(i => String(i.karyawanId) === id && i.tanggal === state.inputDate) || state.queue.some(i => String(i.karyawanId) === id);
+    return Boolean(getLoadedDuplicate(id, state.inputDate) || state.queue.some(i => String(i.karyawanId) === id));
   }
 
   function addQueue() {
@@ -676,10 +734,16 @@
 
     const selected = state.karyawan.filter(k => state.selectedIds.has(k.id));
     const newItems = [];
-    let skipped = 0;
+    const skippedExisting = [];
+    let skippedQueue = 0;
     selected.forEach(k => {
-      if (checkDuplicate(k.id)) {
-        skipped++;
+      const existing = getLoadedDuplicate(k.id, state.inputDate);
+      if (existing) {
+        skippedExisting.push({ row: { tanggal: state.inputDate, karyawanId: k.id, nama: k.nama }, existing });
+        return;
+      }
+      if (state.queue.some(i => String(i.karyawanId) === String(k.id))) {
+        skippedQueue++;
         return;
       }
       newItems.push({
@@ -701,11 +765,59 @@
       state.queue = [...newItems, ...state.queue];
       toast('success', 'Masuk Antrian', `${newItems.length} data ditambahkan.`);
     }
-    if (skipped) toast('warning', 'Data Dilewati', `${skipped} karyawan sudah ada di laporan/antrian.`);
+    if (skippedQueue) toast('warning', 'Data Dilewati', `${skippedQueue} karyawan sudah ada di antrian.`);
+    if (skippedExisting.length) showInfo('Data sudah diinput', formatDuplicateWarning(skippedExisting), 'warning');
     state.selectedIds.clear();
     state.searchDb = '';
     state.viewSelectedOnly = false;
     render({ focus: 'searchDb' });
+  }
+
+  function makeLemburKey(item) {
+    return `${item.tanggal || state.inputDate}|${String(item.karyawanId || item.karyawan_id || '').trim()}`;
+  }
+
+  function getLoadedDuplicate(karyawanId, tanggal = state.inputDate) {
+    const id = String(karyawanId || '').trim();
+    return state.lembur.find(i => String(i.karyawanId) === id && i.tanggal === tanggal) || null;
+  }
+
+  function formatDuplicateWarning(duplicates, savedCount = 0) {
+    const tanggal = duplicates[0]?.row?.tanggal || state.inputDate;
+    const lines = duplicates.slice(0, 8).map(d => {
+      const row = d.row || {};
+      const existing = d.existing || {};
+      const nama = row.nama || existing.nama || '-';
+      const id = row.karyawanId || existing.karyawanId || '-';
+      const penginput = cleanText(existing.penginput) || 'user lain';
+      return `- ${nama} (${id}) sudah diinput oleh ${penginput}`;
+    });
+    const more = duplicates.length > 8 ? `\n...dan ${duplicates.length - 8} data lainnya.` : '';
+    const saved = savedCount > 0 ? `\n\n${savedCount} data lainnya tetap berhasil disimpan.` : '';
+    return `Tanggal ${formatDateId(tanggal)}:\n${lines.join('\n')}${more}${saved}`;
+  }
+
+  async function findExistingLemburRows(rows) {
+    if (!rows.length) return [];
+    if (!state.onlineMode || !state.supabase) {
+      return rows
+        .map(row => getLoadedDuplicate(row.karyawanId, row.tanggal))
+        .filter(Boolean);
+    }
+
+    const tanggal = rows[0].tanggal || state.inputDate;
+    const ids = Array.from(new Set(rows.map(r => String(r.karyawanId || '').trim()).filter(Boolean)));
+    const found = [];
+    for (const part of chunkArray(ids, 500)) {
+      const { data, error } = await state.supabase
+        .from('lembur')
+        .select('id,tanggal,penginput,karyawan_id,nama,section,status,jam,kode,pinjam,shift')
+        .eq('tanggal', tanggal)
+        .in('karyawan_id', part);
+      if (error) throw error;
+      found.push(...(data || []).map(dbToAppLembur));
+    }
+    return found;
   }
 
   async function saveQueue() {
@@ -713,25 +825,60 @@
     if (!state.namaPenginput.trim()) return showInfo('Nama penginput kosong', 'Isi nama penginput terlebih dahulu.', 'warning');
 
     const rows = state.queue.map(q => ({ ...q, id: uuid(), tanggal: state.inputDate, penginput: state.namaPenginput || '-' }));
+    let duplicateRows = [];
+    let savedCount = 0;
+
     try {
       state.syncing = true;
       render();
+
+      const existingRows = await findExistingLemburRows(rows);
+      const existingByKey = new Map(existingRows.map(x => [makeLemburKey(x), x]));
+      const rowsToSave = [];
+
+      rows.forEach(row => {
+        const existing = existingByKey.get(makeLemburKey(row));
+        if (existing) duplicateRows.push({ row, existing });
+        else rowsToSave.push(row);
+      });
+
+      if (rowsToSave.length === 0) {
+        state.queue = [];
+        await loadCounts();
+        if (state.onlineMode) await loadLembur(true);
+        else saveLocalData();
+        showInfo('Data sudah diinput', formatDuplicateWarning(duplicateRows), 'warning');
+        return;
+      }
+
       if (state.onlineMode) {
-        const dbRows = rows.map(appToDbLembur).map(r => { delete r.id; return r; });
-        const { error } = await state.supabase.from('lembur').upsert(dbRows, { onConflict: 'tanggal,karyawan_id' });
-        if (error) throw error;
+        const dbRows = rowsToSave.map(appToDbLembur).map(r => { delete r.id; return r; });
+        const { error } = await state.supabase.from('lembur').insert(dbRows);
+        if (error) {
+          if (error.code === '23505' || String(error.message || '').toLowerCase().includes('duplicate')) {
+            throw new Error('Ada data yang baru saja diinput oleh user lain pada tanggal yang sama. Silakan refresh atau buka ulang pencarian.');
+          }
+          throw error;
+        }
+        savedCount = rowsToSave.length;
         state.queue = [];
         await loadLembur(true);
       } else {
-        state.lembur = [...rows, ...state.lembur];
+        state.lembur = [...rowsToSave, ...state.lembur];
+        savedCount = rowsToSave.length;
         state.queue = [];
         saveLocalData();
       }
+
       await loadCounts();
-      toast('success', 'Tersimpan', `${rows.length} data berhasil disimpan.`);
+      if (duplicateRows.length) {
+        showInfo('Sebagian data ditolak', formatDuplicateWarning(duplicateRows, savedCount), 'warning');
+      } else {
+        toast('success', 'Tersimpan', `${savedCount} data lembur berhasil disimpan.`);
+      }
     } catch (err) {
       console.error(err);
-      showInfo('Gagal menyimpan', err.message || String(err), 'error');
+      showInfo('Gagal menyimpan lembur', err.message || String(err), 'error');
     } finally {
       state.syncing = false;
       render();
@@ -787,24 +934,32 @@
     }
   }
 
-  async function resetCurrentReport() {
-    const ok = await confirmDialog('Reset laporan tanggal ini?', `Semua data lembur tanggal ${formatDateId(state.inputDate)} akan dihapus.`, 'Reset', 'Batal', 'danger');
+  async function resetOvertime() {
+    const scope = getReportScope();
+    const targetText = scope.range && scope.start !== scope.end
+      ? `${formatDateId(scope.start)} s/d ${formatDateId(scope.end)}`
+      : formatDateId(scope.start);
+    const ok = await confirmDialog('Reset Overtime?', `Semua data overtime periode ${targetText} akan dihapus dari database.`, 'Reset Overtime', 'Batal', 'danger');
     if (!ok) return;
     try {
       if (state.onlineMode) {
-        const { error } = await state.supabase.from('lembur').delete().eq('tanggal', state.inputDate);
+        let query = state.supabase.from('lembur').delete();
+        query = scope.range ? query.gte('tanggal', scope.start).lte('tanggal', scope.end) : query.eq('tanggal', scope.start);
+        const { error } = await query;
         if (error) throw error;
         await loadLembur(true);
       } else {
+        const all = getLS(LS.lembur, []);
+        const remaining = Array.isArray(all) ? all.filter(x => !isDateInReportScope(x.tanggal)) : [];
+        setLS(LS.lembur, remaining);
         state.lembur = [];
-        saveLocalData();
       }
       state.queue = [];
       await loadCounts();
-      toast('success', 'Reset berhasil', 'Laporan tanggal ini kosong.');
+      toast('success', 'Reset Overtime berhasil', `Data overtime periode ${targetText} sudah kosong.`);
       render();
     } catch (err) {
-      showInfo('Gagal reset', err.message || String(err), 'error');
+      showInfo('Gagal reset overtime', err.message || String(err), 'error');
     }
   }
 
@@ -832,7 +987,7 @@
     }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Laporan');
-    XLSX.writeFile(wb, `Lembur_${state.inputDate}.xlsx`);
+    { const scope = getReportScope(); XLSX.writeFile(wb, scope.range && scope.start !== scope.end ? `Lembur_${scope.start}_sd_${scope.end}.xlsx` : `Lembur_${scope.start}.xlsx`); }
   }
 
   async function exportAllBackup() {
@@ -1279,14 +1434,15 @@
                 <div>
                   <div class="flex flex-wrap items-center gap-2 mb-1">${statusBadge()} <span id="onlineUsersBadgeWrap">${onlineUsersBadge()}</span> ${state.syncing ? '<span class="text-xs text-blue-600 font-bold">Sync...</span>' : ''}</div>
                   <h1 class="text-2xl md:text-3xl font-black text-slate-900">${safe(cfg.COMPANY_NAME || 'PT Hop Lun Indonesia')}</h1>
-                  <p class="text-sm text-slate-500"> ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
+                  <p class="text-sm text-slate-500">Input Lembur Karyawan - ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
                 </div>
               </div>
               <div class="flex flex-col xl:flex-row gap-3 xl:items-end xl:justify-end">
                 <div class="flex flex-wrap items-center justify-end gap-2">
                   <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
                   <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
-                  <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('trash')} Reset Laporan</button>
+                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileImport" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                  <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('trash')} Reset Overtime</button>
                 </div>
                 <div>
                   <label class="block text-[10px] uppercase font-black text-slate-400 text-right">Penginput</label>
@@ -1297,13 +1453,26 @@
             <div class="p-4 md:p-5 flex flex-col xl:flex-row gap-4 xl:items-end xl:justify-between">
               <div class="flex flex-wrap gap-3 items-center bg-slate-50 border border-slate-200 rounded-2xl p-3">
                 <div>
-                  <label class="block text-[10px] uppercase font-black text-slate-400">Tanggal</label>
+                  <label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Input</label>
                   <div class="mt-1 flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2">${icon('calendar', 'w-4 h-4 text-blue-600')}<input id="inputDate" type="date" value="${safe(state.inputDate)}" class="outline-none text-sm bg-transparent" /></div>
                 </div>
                 <label class="flex items-center gap-2 mt-5 select-none cursor-pointer">
                   <input id="inputHoliday" type="checkbox" ${state.isHoliday ? 'checked' : ''} class="w-4 h-4 accent-red-500" />
                   <span class="font-bold text-sm ${state.isHoliday ? 'text-red-600' : 'text-slate-600'}">Libur/Sabtu</span>
                 </label>
+                <label class="flex items-center gap-2 mt-5 select-none cursor-pointer rounded-xl border border-slate-200 bg-white px-3 py-2">
+                  <input id="inputDateRangeMode" type="checkbox" ${state.dateRangeMode ? 'checked' : ''} class="w-4 h-4 accent-blue-600" />
+                  <span class="font-bold text-sm text-slate-700">Custom Tanggal</span>
+                </label>
+                ${state.dateRangeMode ? `
+                  <div>
+                    <label class="block text-[10px] uppercase font-black text-slate-400">Dari</label>
+                    <div class="mt-1 flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2">${icon('calendar', 'w-4 h-4 text-blue-600')}<input id="inputRangeStart" type="date" value="${safe(getReportScope().start)}" class="outline-none text-sm bg-transparent" /></div>
+                  </div>
+                  <div>
+                    <label class="block text-[10px] uppercase font-black text-slate-400">Sampai</label>
+                    <div class="mt-1 flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2">${icon('calendar', 'w-4 h-4 text-blue-600')}<input id="inputRangeEnd" type="date" value="${safe(getReportScope().end)}" class="outline-none text-sm bg-transparent" /></div>
+                  </div>` : ''}
                 <div class="h-10 w-px bg-slate-200 hidden sm:block"></div>
                 <div class="flex gap-4 text-xs">
                   <div><div class="font-black text-[10px] uppercase text-slate-400">Total DB</div><b>${dbStats.total}</b></div>
@@ -1317,7 +1486,7 @@
                 </div>
               </div>
               <div class="hidden xl:block text-right text-[11px] text-slate-400 font-semibold leading-relaxed max-w-sm">
-                Database online realtime aktif. Gunakan <b class="text-slate-600">Update DB Baru</b> hanya untuk menambahkan karyawan yang belum ada.
+                Database online realtime aktif. Gunakan <b class="text-slate-600">Import Data</b> untuk memasukkan file overtime kemarin ke database.
               </div>
             </div>
           </header>
@@ -1340,7 +1509,7 @@
                 <div class="flex-1 overflow-auto">
                   ${renderQueue()}
                 </div>
-                <button id="btnSaveQueue" ${state.queue.length ? '' : 'disabled'} class="mt-4 w-full rounded-2xl py-3 font-black text-sm flex items-center justify-center gap-2 ${state.queue.length ? 'bg-orange-600 hover:bg-orange-700 text-white shadow' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}">${icon('save')} SIMPAN KE LAPORAN</button>
+                <button id="btnSaveQueue" ${state.queue.length ? '' : 'disabled'} class="mt-4 w-full rounded-2xl py-3 font-black text-sm flex items-center justify-center gap-2 ${state.queue.length ? 'bg-orange-600 hover:bg-orange-700 text-white shadow' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}">${icon('save')} SIMPAN LEMBUR</button>
               </div>
             </section>
 
@@ -1348,7 +1517,7 @@
               <div class="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4 mb-4">
                 <div>
                   <h2 class="font-black text-xl text-slate-800">Data Lembur Karyawan</h2>
-                  <p class="text-sm text-slate-500">${formatDateId(state.inputDate)}</p>
+                  <p class="text-sm text-slate-500">${reportScopeLabel()}</p>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
                   <div id="reportStatsBox" class="flex gap-3 text-xs bg-slate-50 px-3 py-2 rounded-xl border border-slate-100">
@@ -1525,6 +1694,9 @@
     });
     byId('inputDate')?.addEventListener('change', e => changeDate(e.target.value));
     byId('inputHoliday')?.addEventListener('change', e => { state.isHoliday = e.target.checked; render(); });
+    byId('inputDateRangeMode')?.addEventListener('change', e => toggleDateRangeMode(e.target.checked));
+    byId('inputRangeStart')?.addEventListener('change', e => changeReportRange('start', e.target.value));
+    byId('inputRangeEnd')?.addEventListener('change', e => changeReportRange('end', e.target.value));
     byId('btnOpenDb')?.addEventListener('click', () => {
       if (!state.namaPenginput.trim()) return showInfo('Isi nama penginput', 'Nama penginput wajib diisi sebelum input lembur.', 'warning', () => byId('inputNama')?.focus());
       state.modalDbOpen = true; render({ focus: 'searchDb' });
@@ -1534,8 +1706,9 @@
     byId('btnExport')?.addEventListener('click', exportReport);
     byId('btnSaveQueue')?.addEventListener('click', saveQueue);
     byId('btnClearQueue')?.addEventListener('click', clearQueue);
-    byId('btnResetReport')?.addEventListener('click', resetCurrentReport);
+    byId('btnResetReport')?.addEventListener('click', resetOvertime);
     byId('fileDb')?.addEventListener('change', e => { importDatabaseFile(e.target.files[0]); e.target.value = ''; });
+    byId('fileImport')?.addEventListener('change', e => { importLaporanFile(e.target.files[0]); e.target.value = ''; });
     byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; updateReportView(); });
     byId('filterReportSection')?.addEventListener('change', e => { state.filterReportSection = e.target.value; updateReportView(); });
 
@@ -1597,14 +1770,14 @@
 
   function showInfo(title, message, type = 'warning', afterClose) {
     const cls = type === 'error' ? 'text-red-700 bg-red-50 border-red-200' : type === 'success' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : 'text-amber-700 bg-amber-50 border-amber-200';
-    modalRoot.innerHTML = `<div class="fixed inset-0 z-[90] bg-black/50 flex items-center justify-center p-4 fade-in"><div class="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden pop-in"><div class="p-6"><div class="w-14 h-14 rounded-2xl border ${cls} flex items-center justify-center mb-4">${type === 'success' ? icon('check', 'w-7 h-7') : icon('warning', 'w-7 h-7')}</div><h3 class="text-xl font-black text-slate-900">${safe(title)}</h3><p class="text-sm text-slate-600 leading-6 mt-2">${safe(message)}</p></div><div class="p-4 bg-slate-50 border-t flex justify-end"><button id="infoOk" class="px-4 py-2 rounded-xl bg-slate-800 text-white text-sm font-bold hover:bg-slate-900">OK</button></div></div></div>`;
+    modalRoot.innerHTML = `<div class="fixed inset-0 z-[90] bg-black/50 flex items-center justify-center p-4 fade-in"><div class="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden pop-in"><div class="p-6"><div class="w-14 h-14 rounded-2xl border ${cls} flex items-center justify-center mb-4">${type === 'success' ? icon('check', 'w-7 h-7') : icon('warning', 'w-7 h-7')}</div><h3 class="text-xl font-black text-slate-900">${safe(title)}</h3><p class="text-sm text-slate-600 leading-6 mt-2 whitespace-pre-line">${safe(message)}</p></div><div class="p-4 bg-slate-50 border-t flex justify-end"><button id="infoOk" class="px-4 py-2 rounded-xl bg-slate-800 text-white text-sm font-bold hover:bg-slate-900">OK</button></div></div></div>`;
     byId('infoOk').addEventListener('click', () => { modalRoot.innerHTML = ''; if (afterClose) afterClose(); });
   }
 
   function confirmDialog(title, message, confirmText = 'OK', cancelText = 'Batal', type = 'warning') {
     return new Promise(resolve => {
       const confirmCls = type === 'danger' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700';
-      modalRoot.innerHTML = `<div class="fixed inset-0 z-[90] bg-black/50 flex items-center justify-center p-4 fade-in"><div class="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden pop-in"><div class="p-6"><div class="w-14 h-14 rounded-2xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mb-4">${icon('warning', 'w-7 h-7')}</div><h3 class="text-xl font-black text-slate-900">${safe(title)}</h3><p class="text-sm text-slate-600 leading-6 mt-2">${safe(message)}</p></div><div class="p-4 bg-slate-50 border-t flex justify-end gap-2"><button id="confirmCancel" class="px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-100">${safe(cancelText)}</button><button id="confirmOk" class="px-4 py-2 rounded-xl text-white text-sm font-bold ${confirmCls}">${safe(confirmText)}</button></div></div></div>`;
+      modalRoot.innerHTML = `<div class="fixed inset-0 z-[90] bg-black/50 flex items-center justify-center p-4 fade-in"><div class="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden pop-in"><div class="p-6"><div class="w-14 h-14 rounded-2xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mb-4">${icon('warning', 'w-7 h-7')}</div><h3 class="text-xl font-black text-slate-900">${safe(title)}</h3><p class="text-sm text-slate-600 leading-6 mt-2 whitespace-pre-line">${safe(message)}</p></div><div class="p-4 bg-slate-50 border-t flex justify-end gap-2"><button id="confirmCancel" class="px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-100">${safe(cancelText)}</button><button id="confirmOk" class="px-4 py-2 rounded-xl text-white text-sm font-bold ${confirmCls}">${safe(confirmText)}</button></div></div></div>`;
       byId('confirmCancel').addEventListener('click', () => { modalRoot.innerHTML = ''; resolve(false); });
       byId('confirmOk').addEventListener('click', () => { modalRoot.innerHTML = ''; resolve(true); });
     });
