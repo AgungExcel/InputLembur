@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.10.0';
+  const APP_VERSION = 'online-realtime-1.11.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -69,6 +69,7 @@
     searchDb: '',
     filterSection: 'All',
     searchReport: '',
+    filterReportStatus: 'All',
     filterReportSection: 'All',
     batchJam: '',
     batchPinjam: '',
@@ -746,6 +747,7 @@
   }
 
   async function refreshReportScope() {
+    state.filterReportStatus = 'All';
     state.filterReportSection = 'All';
     state.searchReport = '';
     if (state.onlineMode) await loadLembur();
@@ -796,15 +798,32 @@
   function getFilteredReport() {
     const q = state.searchReport.toLowerCase().trim();
     return state.lembur.filter(i => {
+      const status = normalizeStatus(i.status);
       const matchQ = !q || String(i.nama).toLowerCase().includes(q) || String(i.karyawanId).toLowerCase().includes(q) || String(i.section).toLowerCase().includes(q);
+      const matchStatus = state.filterReportStatus === 'All' || status === state.filterReportStatus;
       const matchS = state.filterReportSection === 'All' || i.section === state.filterReportSection;
-      return isDateInReportScope(i.tanggal) && matchQ && matchS;
+      return isDateInReportScope(i.tanggal) && matchQ && matchStatus && matchS;
     });
   }
 
   function getSections(source) {
     const arr = source.map(k => k.section).filter(Boolean);
     return ['All', ...Array.from(new Set(arr)).sort((a, b) => a.localeCompare(b))];
+  }
+
+  function getReportSections() {
+    const scoped = state.lembur.filter(i => {
+      const matchDate = isDateInReportScope(i.tanggal);
+      const matchStatus = state.filterReportStatus === 'All' || normalizeStatus(i.status) === state.filterReportStatus;
+      return matchDate && matchStatus;
+    });
+    return getSections(scoped);
+  }
+
+  function reportSectionOptions() {
+    const sections = getReportSections();
+    if (!sections.includes(state.filterReportSection)) state.filterReportSection = 'All';
+    return sections.map(s => `<option value="${safe(s)}" ${state.filterReportSection === s ? 'selected' : ''}>${s === 'All' ? 'Semua Section' : safe(s)}</option>`).join('');
   }
 
   function checkDuplicate(karyawanId) {
@@ -1619,7 +1638,12 @@
               </div>
               <div class="flex flex-col md:flex-row gap-3 bg-slate-50 border border-slate-100 rounded-2xl p-3 mb-4">
                 <div class="relative flex-1"><span class="absolute left-3 top-2.5 text-slate-400">${icon('search')}</span><input id="searchReport" class="w-full pl-10 pr-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-green-500" placeholder="Cari nama/ID/section..." value="${safe(state.searchReport)}" /></div>
-                <select id="filterReportSection" class="border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:ring-2 focus:ring-green-500">${getSections(state.lembur).map(s => `<option value="${safe(s)}" ${state.filterReportSection === s ? 'selected' : ''}>${safe(s)}</option>`).join('')}</select>
+                <select id="filterReportStatus" class="border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:ring-2 focus:ring-green-500 min-w-[150px]">
+                  <option value="All" ${state.filterReportStatus === 'All' ? 'selected' : ''}>Semua Status</option>
+                  <option value="Worker" ${state.filterReportStatus === 'Worker' ? 'selected' : ''}>Worker</option>
+                  <option value="Staff" ${state.filterReportStatus === 'Staff' ? 'selected' : ''}>Staff</option>
+                </select>
+                <select id="filterReportSection" class="border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:ring-2 focus:ring-green-500 min-w-[190px]">${reportSectionOptions()}</select>
               </div>
               <div id="reportTableBox" class="overflow-auto flex-1 border border-slate-200 rounded-2xl">
                 ${renderReportTable(filteredReport)}
@@ -1718,6 +1742,8 @@
     const statsBox = byId('reportStatsBox');
     const tableBox = byId('reportTableBox');
     const count = byId('reportCount');
+    const sectionSelect = byId('filterReportSection');
+    if (sectionSelect) sectionSelect.innerHTML = reportSectionOptions();
     if (statsBox) statsBox.innerHTML = renderReportStats(stats);
     if (tableBox) tableBox.innerHTML = renderReportTable(filteredReport);
     if (count) count.textContent = `Menampilkan ${filteredReport.length} data`;
@@ -1801,6 +1827,7 @@
     byId('fileDb')?.addEventListener('change', e => { importDatabaseFile(e.target.files[0]); e.target.value = ''; });
     byId('fileImport')?.addEventListener('change', e => { importLaporanFile(e.target.files[0]); e.target.value = ''; });
     byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; updateReportView(); });
+    byId('filterReportStatus')?.addEventListener('change', e => { state.filterReportStatus = e.target.value; state.filterReportSection = 'All'; updateReportView(); });
     byId('filterReportSection')?.addEventListener('change', e => { state.filterReportSection = e.target.value; updateReportView(); });
 
     if (state.modalDbOpen) {
