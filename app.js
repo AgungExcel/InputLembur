@@ -1279,7 +1279,7 @@
                 <div>
                   <div class="flex flex-wrap items-center gap-2 mb-1">${statusBadge()} <span id="onlineUsersBadgeWrap">${onlineUsersBadge()}</span> ${state.syncing ? '<span class="text-xs text-blue-600 font-bold">Sync...</span>' : ''}</div>
                   <h1 class="text-2xl md:text-3xl font-black text-slate-900">${safe(cfg.COMPANY_NAME || 'PT Hop Lun Indonesia')}</h1>
-                  <p class="text-sm text-slate-500">Input Lembur Karyawan - ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
+                  <p class="text-sm text-slate-500"> ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
                 </div>
               </div>
               <div class="flex flex-col xl:flex-row gap-3 xl:items-end xl:justify-end">
