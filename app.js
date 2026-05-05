@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.9.0';
+  const APP_VERSION = 'online-realtime-1.10.0';
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -20,7 +20,8 @@
     nama: 'hoplun_nama_penginput_v1',
     lastMode: 'hoplun_last_mode_v1',
     oldKaryawan: 'dbKaryawan_v2',
-    oldLembur: 'dataLembur_temp'
+    oldLembur: 'dataLembur_temp',
+    karyawanOrder: 'hoplun_karyawan_excel_order_v1'
   };
 
   const cfg = window.HOPLUN_CONFIG || {};
@@ -45,6 +46,8 @@
     channelKaryawan: null,
     channelPresence: null,
     clientId: getSessionId(),
+    karyawanOrderMap: new Map(Object.entries(getLS(LS.karyawanOrder, {})).map(([id, order]) => [String(id), Number(order)]).filter(([, order]) => Number.isFinite(order) && order > 0)),
+    karyawanDisplayOrderColumn: null,
     onlineUsers: [],
     totalLemburAll: 0,
     totalLemburCurrentUser: 0,
@@ -171,6 +174,82 @@
     return chunks;
   }
 
+  function normalizeDisplayOrder(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const raw = String(value).replace(',', '.').trim();
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function getSavedKaryawanOrder(id) {
+    if (!id || !state.karyawanOrderMap) return null;
+    const n = Number(state.karyawanOrderMap.get(String(id)));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function saveKaryawanOrderMap() {
+    const obj = {};
+    state.karyawanOrderMap.forEach((order, id) => {
+      const n = normalizeDisplayOrder(order);
+      if (id && n !== null) obj[String(id)] = n;
+    });
+    setLS(LS.karyawanOrder, obj);
+  }
+
+  function compareKaryawanOrder(a, b) {
+    const ao = normalizeDisplayOrder(a?.displayOrder) ?? getSavedKaryawanOrder(a?.id) ?? normalizeDisplayOrder(a?._sourceIndex);
+    const bo = normalizeDisplayOrder(b?.displayOrder) ?? getSavedKaryawanOrder(b?.id) ?? normalizeDisplayOrder(b?._sourceIndex);
+    if (ao !== null && bo !== null && ao !== bo) return ao - bo;
+    if (ao !== null && bo === null) return -1;
+    if (ao === null && bo !== null) return 1;
+    return String(a?.nama || '').localeCompare(String(b?.nama || ''));
+  }
+
+  function sortKaryawanRows(rows) {
+    return (rows || []).slice().sort(compareKaryawanOrder).map(row => {
+      const clean = { ...row };
+      delete clean._sourceIndex;
+      return clean;
+    });
+  }
+
+  function rememberKaryawanExcelOrder(rows) {
+    const next = new Map();
+    (rows || []).forEach((row, index) => {
+      const k = dbToAppKaryawan(row);
+      if (isInvalidKaryawanRow(k)) return;
+      const order = normalizeDisplayOrder(k.displayOrder) ?? normalizeDisplayOrder(row?.__row_order) ?? (index + 1);
+      if (!next.has(String(k.id))) next.set(String(k.id), order);
+    });
+    if (!next.size) return 0;
+    state.karyawanOrderMap = next;
+    saveKaryawanOrderMap();
+    state.karyawan = sortKaryawanRows(state.karyawan.map(k => ({ ...k, displayOrder: getSavedKaryawanOrder(k.id) ?? k.displayOrder })));
+    return next.size;
+  }
+
+  async function detectKaryawanDisplayOrderColumn() {
+    if (!state.onlineMode || !state.supabase) return false;
+    if (state.karyawanDisplayOrderColumn !== null) return state.karyawanDisplayOrderColumn;
+    try {
+      const { error } = await state.supabase.from('karyawan').select('display_order').limit(1);
+      state.karyawanDisplayOrderColumn = !error;
+    } catch {
+      state.karyawanDisplayOrderColumn = false;
+    }
+    return state.karyawanDisplayOrderColumn;
+  }
+
+  async function buildKaryawanPayloadRows(rows) {
+    const useDisplayOrder = await detectKaryawanDisplayOrderColumn();
+    return rows.map((k, index) => {
+      const row = { id: k.id, nama: k.nama, section: k.section || '', status: normalizeStatus(k.status) };
+      const order = normalizeDisplayOrder(k.displayOrder) ?? getSavedKaryawanOrder(k.id) ?? (index + 1);
+      if (useDisplayOrder && order !== null) row.display_order = order;
+      return row;
+    });
+  }
+
   async function fetchAllRows(table, select = '*', options = {}) {
     const pageSize = options.pageSize || 1000;
     const rows = [];
@@ -220,7 +299,7 @@
   async function upsertKaryawanRows(rows) {
     const cleanRows = sanitizeKaryawanRows(rows);
     for (const part of chunkArray(cleanRows, 500)) {
-      const payload = part.map(k => ({ id: k.id, nama: k.nama, section: k.section || '', status: normalizeStatus(k.status) }));
+      const payload = await buildKaryawanPayloadRows(part);
       const { error } = await state.supabase.from('karyawan').upsert(payload, { onConflict: 'id' });
       if (error) throw error;
     }
@@ -232,7 +311,7 @@
     const cleanRows = sanitizeKaryawanRows(rows);
     if (!cleanRows.length) return;
     for (const part of chunkArray(cleanRows, 500)) {
-      const payload = part.map(k => ({ id: k.id, nama: k.nama, section: k.section || '', status: normalizeStatus(k.status) }));
+      const payload = await buildKaryawanPayloadRows(part);
       const { error } = await state.supabase.from('karyawan').upsert(payload, { onConflict: 'id', ignoreDuplicates: true });
       if (error) throw error;
     }
@@ -263,7 +342,7 @@
       }
     });
     return {
-      rows: Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama)),
+      rows: sortKaryawanRows(Array.from(map.values())),
       added,
       skipped: Math.max(cleanParsed.length - added, 0),
       invalid: Math.max((parsedRows || []).length - cleanParsed.length, 0)
@@ -368,12 +447,15 @@
 
   function sanitizeKaryawanRows(rows) {
     const map = new Map();
-    (rows || []).forEach(row => {
+    (rows || []).forEach((row, index) => {
       const k = dbToAppKaryawan(row);
       if (isInvalidKaryawanRow(k)) return;
+      const order = normalizeDisplayOrder(k.displayOrder) ?? getSavedKaryawanOrder(k.id) ?? (index + 1);
+      k.displayOrder = order;
+      k._sourceIndex = index + 1;
       map.set(String(k.id), k);
     });
-    return Array.from(map.values()).sort((a, b) => a.nama.localeCompare(b.nama));
+    return sortKaryawanRows(Array.from(map.values()));
   }
 
   function getOvertimeCode(jam, status, holiday) {
@@ -420,11 +502,13 @@
     const nama = pickValue(row, ['nama', 'Nama', 'NAMA', 'Nama Karyawan', 'NAMA KARYAWAN', 'Name', 'Employee Name']);
     const section = pickValue(row, ['section', 'Section', 'SECTION', 'Seksi', 'SEKSI', 'Bagian', 'BAGIAN', 'Department', 'Departemen']);
     const status = pickValue(row, ['status', 'Status', 'STATUS', 'Kategori', 'KATEGORI', 'Type']);
+    const displayOrder = pickValue(row, ['display_order', 'displayOrder', 'Display Order', 'Urutan', 'No Urut', 'No', 'NO', '__row_order', 'row_order']);
     return {
       id: cleanText(id),
       nama: cleanText(nama),
       section: cleanText(section),
-      status: normalizeStatus(status)
+      status: normalizeStatus(status),
+      displayOrder: normalizeDisplayOrder(displayOrder)
     };
   }
 
@@ -510,8 +594,9 @@
 
   async function loadKaryawan() {
     if (!state.onlineMode || !state.supabase) return;
+    const hasOrderColumn = await detectKaryawanDisplayOrderColumn();
     const data = await fetchAllRows('karyawan', '*', {
-      order: { column: 'nama', ascending: true }
+      order: { column: hasOrderColumn ? 'display_order' : 'nama', ascending: true }
     });
     state.karyawan = sanitizeKaryawanRows(data || []);
     state.totalKaryawanAll = state.karyawan.length;
@@ -1101,7 +1186,11 @@
         obj[h] = value;
         if (value) hasData = true;
       }
-      if (hasData) rows.push(obj);
+      if (hasData) {
+        obj.__row_order = rows.length + 1;
+        obj.__excel_row_number = r + 1;
+        rows.push(obj);
+      }
     }
     return rows;
   }
@@ -1156,6 +1245,7 @@
       const rows = sheetRows(wb, ['Karyawan', 'DBLembur', 'DB', 'Database']);
       const parsed = parseKaryawanRows(rows);
       if (!parsed.length) return showInfo('Import database gagal', `Tidak ada data karyawan valid. Header yang didukung: ID/Nomor ID, Nama, Section/SECTION, Status/STATUS. Baris terbaca: ${rows.length}.`, 'error');
+      rememberKaryawanExcelOrder(parsed);
 
       let added = 0;
       let skipped = 0;
@@ -1250,6 +1340,7 @@
       const rows = sheetRows(wb, ['Karyawan', 'DBLembur', 'DB', 'Database']);
       const parsed = parseKaryawanRows(rows);
       if (!parsed.length) throw new Error('database.xlsx ditemukan, tetapi tidak ada data karyawan valid. Header minimal: ID/Nomor ID dan Nama.');
+      rememberKaryawanExcelOrder(parsed);
 
       if (uploadOnline && state.onlineMode) {
         await loadKaryawan();
