@@ -1612,14 +1612,16 @@
               </button>
 
               <div class="bg-orange-50 border border-orange-200 rounded-3xl shadow-sm p-5 flex flex-col min-h-[480px]">
-                <div class="flex items-center justify-between border-b border-orange-200 pb-3 mb-3">
-                  <h2 class="font-black text-orange-800 flex items-center gap-2">${icon('list')} Antrian (${state.queue.length})</h2>
-                  ${state.queue.length ? '<button id="btnClearQueue" class="text-xs text-orange-700 underline font-bold">Reset Semua</button>' : ''}
+                <div class="flex items-center justify-between gap-3 border-b border-orange-200 pb-3 mb-3">
+                  <h2 class="font-black text-orange-800 flex items-center gap-2 shrink-0">${icon('list')} Antrian (${state.queue.length})</h2>
+                  <div class="flex items-center justify-end gap-2 flex-wrap">
+                    ${state.queue.length ? '<button id="btnClearQueue" class="text-xs text-orange-700 underline font-bold">Reset Semua</button>' : ''}
+                    <button id="btnSaveQueue" ${state.queue.length ? '' : 'disabled'} class="rounded-xl px-3 py-2 font-black text-xs flex items-center justify-center gap-2 ${state.queue.length ? 'bg-orange-600 hover:bg-orange-700 text-white shadow' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}">${icon('save')} SIMPAN LEMBUR</button>
+                  </div>
                 </div>
                 <div class="flex-1 overflow-auto">
                   ${renderQueue()}
                 </div>
-                <button id="btnSaveQueue" ${state.queue.length ? '' : 'disabled'} class="mt-4 w-full rounded-2xl py-3 font-black text-sm flex items-center justify-center gap-2 ${state.queue.length ? 'bg-orange-600 hover:bg-orange-700 text-white shadow' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}">${icon('save')} SIMPAN LEMBUR</button>
               </div>
             </section>
 
