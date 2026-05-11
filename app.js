@@ -1,9 +1,10 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.13.0-db-replace-join-append';
+  const APP_VERSION = 'online-realtime-1.14.0-join-baru-drive-download';
   const JOIN_BARU_FILE_ID = '176jG2q02uaZUpdz7ZHQMnuCrIJ6FFPqW';
   const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
+  const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -1329,7 +1330,6 @@
         const oldMap = new Map((state.karyawan || []).map(k => [String(k.id), k]));
         same = prepared.rows.filter(k => rowsSameKaryawan(k, oldMap.get(String(k.id)))).length;
         removed = Math.max((state.karyawan || []).length - prepared.rows.filter(k => oldMap.has(String(k.id))).length, 0);
-
         await deleteAllKaryawanRows();
         await upsertKaryawanRows(prepared.rows);
         await loadKaryawan();
@@ -1382,11 +1382,18 @@
   }
 
 
-  function getGoogleSheetExportUrl(rawUrl = '') {
-    const configured = String(rawUrl || cfg.JOIN_BARU_URL || JOIN_BARU_EXPORT_URL || '').trim();
-    const idFromConfigured = (configured.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/) || [])[1];
-    const id = idFromConfigured || JOIN_BARU_FILE_ID;
-    return `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`;
+  function getJoinBaruFileId(rawUrl = '') {
+    const configured = String(rawUrl || cfg.JOIN_BARU_URL || '').trim();
+    return (configured.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/) || configured.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || configured.match(/[?&]id=([a-zA-Z0-9_-]+)/) || [])[1] || JOIN_BARU_FILE_ID;
+  }
+
+  function buildJoinBaruDownloadCandidates() {
+    const id = getJoinBaruFileId();
+    return [
+      { url: `https://drive.google.com/uc?export=download&id=${id}`, kind: 'binary', label: 'download asli Drive (.xlsb/.xlsx)' },
+      { url: `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`, kind: 'binary', label: 'export Google Sheet xlsx' },
+      { url: `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&gid=0`, kind: 'csv', label: 'export CSV sheet pertama' }
+    ];
   }
 
   function excelSerialToISO(value) {
@@ -1404,11 +1411,11 @@
     const raw = cleanText(value, true);
     if (!raw) return '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-    if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(raw)) {
-      const [d0, m0, y0] = raw.split('/');
-      const d = d0.padStart(2, '0');
-      const m = m0.padStart(2, '0');
-      const y = y0.length === 2 ? `20${y0}` : y0.padStart(4, '0');
+    if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(raw)) {
+      const parts = raw.split(/[\/-]/);
+      const d = parts[0].padStart(2, '0');
+      const m = parts[1].padStart(2, '0');
+      const y = parts[2].length === 2 ? `20${parts[2]}` : parts[2].padStart(4, '0');
       return `${y}-${m}-${d}`;
     }
     return excelSerialToISO(raw) || '';
@@ -1439,13 +1446,36 @@
     return Array.from(map.values()).sort((a, b) => a.joindate.localeCompare(b.joindate) || (a.displayOrder || 0) - (b.displayOrder || 0));
   }
 
-  async function fetchJoinBaruWorkbook() {
-    const url = getGoogleSheetExportUrl();
-    const sep = url.includes('?') ? '&' : '?';
-    const res = await fetch(`${url}${sep}t=${Date.now()}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP ${res.status} saat mengambil file Google Sheet. Pastikan aksesnya Anyone with the link.`);
+  async function readWorkbookFromResponse(res, candidate) {
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
     const buf = await res.arrayBuffer();
+    if (candidate.kind === 'csv' || contentType.includes('text/csv')) {
+      const csvText = new TextDecoder('utf-8').decode(buf);
+      return XLSX.read(csvText, { type: 'string', cellDates: true });
+    }
+    const firstBytes = new Uint8Array(buf.slice(0, 20));
+    const signature = Array.from(firstBytes).map(x => String.fromCharCode(x)).join('');
+    if (contentType.includes('text/html') || signature.trim().startsWith('<')) {
+      throw new Error('Google mengirim halaman HTML/login, bukan file Excel. Coba gunakan link publik atau ubah file menjadi Google Sheets.');
+    }
     return XLSX.read(buf, { type: 'array', cellDates: true });
+  }
+
+  async function fetchJoinBaruWorkbook() {
+    const candidates = buildJoinBaruDownloadCandidates();
+    const errors = [];
+    for (const candidate of candidates) {
+      try {
+        const sep = candidate.url.includes('?') ? '&' : '?';
+        const res = await fetch(`${candidate.url}${sep}t=${Date.now()}`, { cache: 'no-store', redirect: 'follow' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await readWorkbookFromResponse(res, candidate);
+      } catch (err) {
+        errors.push(`${candidate.label}: ${err.message || String(err)}`);
+        console.warn('Gagal ambil Join Baru:', candidate.label, err);
+      }
+    }
+    throw new Error(`File Join Baru belum bisa diambil otomatis. Detail: ${errors.join(' | ')}. Solusi paling aman: buka file di Google Drive lalu File > Save as Google Sheets, kemudian pakai link Google Sheets hasil konversi; atau download .xlsx/.xlsb dan upload manual lewat Update Database Baru jika ingin replace.`);
   }
 
   async function updateJoinBaruFromLink() {
@@ -1484,7 +1514,7 @@
       toast(added ? 'success' : 'info', 'Update Join Baru selesai', `${parsed.length} data terbaca. ${added} ditambahkan di bawah database, ${skipped} sudah ada dan dilewati.`);
     } catch (err) {
       console.error(err);
-      showInfo('Update Join Baru gagal', `${err.message || String(err)}\n\nJika browser memblokir Google Sheet, pastikan sharing file Anyone with the link atau download manual file .xlsx.`, 'error');
+      showInfo('Update Join Baru gagal', err.message || String(err), 'error');
     } finally {
       state.syncing = false;
       render();
@@ -1751,7 +1781,7 @@
               <div class="flex flex-col xl:flex-row gap-3 xl:items-end xl:justify-end">
                 <div class="flex flex-wrap items-center justify-end gap-2">
                   <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
-                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update Database Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update Database Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.xlsb,.csv" class="hidden" /></label>
                   <button id="btnOpenJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-cyan-600 to-sky-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('refresh')} Update Join Baru</button>
                   <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileImport" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
                   <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('trash')} Reset Overtime</button>
