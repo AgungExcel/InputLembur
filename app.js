@@ -1,7 +1,10 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.11.0';
+  const APP_VERSION = 'online-realtime-1.14.0-join-baru-drive-download';
+  const JOIN_BARU_FILE_ID = '176jG2q02uaZUpdz7ZHQMnuCrIJ6FFPqW';
+  const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
+  const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
   const root = document.getElementById('root');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -74,7 +77,12 @@
     batchJam: '',
     batchPinjam: '',
     batchShift: 'Pagi',
-    modalDbOpen: false
+    modalDbOpen: false,
+    joinBaruModalOpen: false,
+    joinBaruStart: todayISO(),
+    joinBaruEnd: todayISO(),
+    joinBaruRows: [],
+    joinBaruSummary: null
   };
 
   const icons = {
@@ -329,6 +337,51 @@
       else baru.push(k);
     });
     return { baru, sudahAda, invalid: Math.max((parsedRows || []).length - cleanParsed.length, 0) };
+  }
+
+
+  function rowsSameKaryawan(a, b) {
+    return String(a?.id || '') === String(b?.id || '')
+      && cleanText(a?.nama) === cleanText(b?.nama)
+      && cleanText(a?.section) === cleanText(b?.section)
+      && normalizeStatus(a?.status) === normalizeStatus(b?.status);
+  }
+
+  function prepareReplaceKaryawanRows(parsedRows) {
+    const cleanParsed = sanitizeKaryawanRows(parsedRows || []);
+    return {
+      rows: cleanParsed.map((k, index) => ({ ...k, displayOrder: normalizeDisplayOrder(k.displayOrder) ?? (index + 1) })),
+      invalid: Math.max((parsedRows || []).length - cleanParsed.length, 0)
+    };
+  }
+
+  function mergeKaryawanAppendBawah(existingRows, parsedRows) {
+    const cleanExisting = sanitizeKaryawanRows(existingRows || []);
+    const existingIds = new Set(cleanExisting.map(k => String(k.id)));
+    const maxOrder = cleanExisting.reduce((max, k, idx) => Math.max(max, normalizeDisplayOrder(k.displayOrder) ?? (idx + 1)), 0);
+    const cleanParsed = sanitizeKaryawanRows(parsedRows || []);
+    const append = [];
+    const skippedRows = [];
+    cleanParsed.forEach(k => {
+      if (existingIds.has(String(k.id))) {
+        skippedRows.push(k);
+        return;
+      }
+      existingIds.add(String(k.id));
+      append.push({ ...k, displayOrder: maxOrder + append.length + 1 });
+    });
+    return {
+      rows: cleanExisting.concat(append),
+      addedRows: append,
+      added: append.length,
+      skipped: skippedRows.length,
+      invalid: Math.max((parsedRows || []).length - cleanParsed.length, 0)
+    };
+  }
+
+  async function deleteAllKaryawanRows() {
+    const { error } = await state.supabase.from('karyawan').delete().neq('id', '__never_match_empty_delete_all__');
+    if (error) throw error;
   }
 
   function mergeKaryawanTambahBaru(existingRows, parsedRows) {
@@ -1263,37 +1316,38 @@
       const wb = await parseSheet(file);
       const rows = sheetRows(wb, ['Karyawan', 'DBLembur', 'DB', 'Database']);
       const parsed = parseKaryawanRows(rows);
-      if (!parsed.length) return showInfo('Import database gagal', `Tidak ada data karyawan valid. Header yang didukung: ID/Nomor ID, Nama, Section/SECTION, Status/STATUS. Baris terbaca: ${rows.length}.`, 'error');
-      rememberKaryawanExcelOrder(parsed);
+      if (!parsed.length) return showInfo('Update Database Baru gagal', `Tidak ada data karyawan valid. Header yang didukung: ID/Nomor ID, Nama, Section/SECTION, Status/STATUS. Baris terbaca: ${rows.length}.`, 'error');
 
-      let added = 0;
-      let skipped = 0;
+      const prepared = prepareReplaceKaryawanRows(parsed);
+      rememberKaryawanExcelOrder(prepared.rows);
+
+      let same = 0;
+      let removed = 0;
+      const replaced = prepared.rows.length;
 
       if (state.onlineMode) {
         await loadKaryawan();
-        const split = splitNewKaryawanRows(parsed, state.karyawan);
-        added = split.baru.length;
-        skipped = split.sudahAda.length;
-        if (added) await insertMissingKaryawanRows(split.baru);
+        const oldMap = new Map((state.karyawan || []).map(k => [String(k.id), k]));
+        same = prepared.rows.filter(k => rowsSameKaryawan(k, oldMap.get(String(k.id)))).length;
+        removed = Math.max((state.karyawan || []).length - prepared.rows.filter(k => oldMap.has(String(k.id))).length, 0);
+        await deleteAllKaryawanRows();
+        await upsertKaryawanRows(prepared.rows);
         await loadKaryawan();
         await loadCounts();
       } else {
-        const merged = mergeKaryawanTambahBaru(state.karyawan, parsed);
-        state.karyawan = merged.rows;
-        added = merged.added;
-        skipped = merged.skipped;
+        const oldMap = new Map((state.karyawan || []).map(k => [String(k.id), k]));
+        same = prepared.rows.filter(k => rowsSameKaryawan(k, oldMap.get(String(k.id)))).length;
+        removed = Math.max((state.karyawan || []).length - prepared.rows.filter(k => oldMap.has(String(k.id))).length, 0);
+        state.karyawan = prepared.rows;
+        state.totalKaryawanAll = prepared.rows.length;
         saveLocalData();
       }
 
-      if (added) {
-        toast('success', 'Database ditambah', `${added} karyawan baru masuk. ${skipped} sudah ada dan dilewati. Baris tidak valid otomatis dibuang.`);
-      } else {
-        toast('info', 'Tidak ada data baru', `${skipped} karyawan dari file sudah ada di database.`);
-      }
+      toast('success', 'Update Database Baru selesai', `Database lama diganti dengan file baru. Total aktif: ${replaced}. Sama/dilewati: ${same}. Terhapus karena tidak ada di file: ${removed}. Baris tidak valid: ${prepared.invalid}.`);
       render();
     } catch (err) {
       console.error(err);
-      showInfo('Import database gagal', err.message || String(err), 'error');
+      showInfo('Update Database Baru gagal', `${err.message || String(err)}\n\nCatatan: tombol ini mengganti seluruh database karyawan dengan isi file. Jika database online menolak hapus karena data lembur masih terhubung, kosongkan/reset data lembur dulu atau gunakan Update Join Baru untuk menambah saja.`, 'error');
     } finally {
       state.syncing = false;
       render();
@@ -1325,6 +1379,183 @@
       console.error(err);
       showInfo('Import data gagal', err.message || String(err), 'error');
     }
+  }
+
+
+  function getJoinBaruFileId(rawUrl = '') {
+    const configured = String(rawUrl || cfg.JOIN_BARU_URL || '').trim();
+    return (configured.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/) || configured.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || configured.match(/[?&]id=([a-zA-Z0-9_-]+)/) || [])[1] || JOIN_BARU_FILE_ID;
+  }
+
+  function buildJoinBaruDownloadCandidates() {
+    const id = getJoinBaruFileId();
+    return [
+      { url: `https://drive.google.com/uc?export=download&id=${id}`, kind: 'binary', label: 'download asli Drive (.xlsb/.xlsx)' },
+      { url: `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`, kind: 'binary', label: 'export Google Sheet xlsx' },
+      { url: `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&gid=0`, kind: 'csv', label: 'export CSV sheet pertama' }
+    ];
+  }
+
+  function excelSerialToISO(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    try {
+      const parsed = XLSX.SSF.parse_date_code(n);
+      if (!parsed || !parsed.y || !parsed.m || !parsed.d) return '';
+      return `${String(parsed.y).padStart(4, '0')}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')}`;
+    } catch { return ''; }
+  }
+
+  function normalizeDateCell(value) {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+    const raw = cleanText(value, true);
+    if (!raw) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(raw)) {
+      const parts = raw.split(/[\/-]/);
+      const d = parts[0].padStart(2, '0');
+      const m = parts[1].padStart(2, '0');
+      const y = parts[2].length === 2 ? `20${parts[2]}` : parts[2].padStart(4, '0');
+      return `${y}-${m}-${d}`;
+    }
+    return excelSerialToISO(raw) || '';
+  }
+
+  function getRawCellValue(sheet, r, c) {
+    const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+    return cell ? cell.v : '';
+  }
+
+  function parseJoinBaruRows(wb) {
+    const sheetName = wb.SheetNames[0];
+    const sheet = sheetName ? wb.Sheets[sheetName] : null;
+    if (!sheet || !sheet['!ref']) return [];
+    const range = XLSX.utils.decode_range(sheet['!ref']);
+    const dates = orderedDates(state.joinBaruStart || todayISO(), state.joinBaruEnd || todayISO());
+    const map = new Map();
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      const joindate = normalizeDateCell(getRawCellValue(sheet, r, 16) || getCellText(sheet, r, 16));
+      const id = cleanText(getCellText(sheet, r, 3));
+      const nama = cleanText(getCellText(sheet, r, 1));
+      const section = cleanText(getCellText(sheet, r, 12));
+      const k = { id, nama, section, status: 'Worker', displayOrder: r + 1 };
+      if (!joindate || joindate < dates.start || joindate > dates.end) continue;
+      if (isInvalidKaryawanRow(k)) continue;
+      map.set(String(id), { joindate, id, nama, section, status: 'Worker', displayOrder: r + 1 });
+    }
+    return Array.from(map.values()).sort((a, b) => a.joindate.localeCompare(b.joindate) || (a.displayOrder || 0) - (b.displayOrder || 0));
+  }
+
+  async function readWorkbookFromResponse(res, candidate) {
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const buf = await res.arrayBuffer();
+    if (candidate.kind === 'csv' || contentType.includes('text/csv')) {
+      const csvText = new TextDecoder('utf-8').decode(buf);
+      return XLSX.read(csvText, { type: 'string', cellDates: true });
+    }
+    const firstBytes = new Uint8Array(buf.slice(0, 20));
+    const signature = Array.from(firstBytes).map(x => String.fromCharCode(x)).join('');
+    if (contentType.includes('text/html') || signature.trim().startsWith('<')) {
+      throw new Error('Google mengirim halaman HTML/login, bukan file Excel. Coba gunakan link publik atau ubah file menjadi Google Sheets.');
+    }
+    return XLSX.read(buf, { type: 'array', cellDates: true });
+  }
+
+  async function fetchJoinBaruWorkbook() {
+    const candidates = buildJoinBaruDownloadCandidates();
+    const errors = [];
+    for (const candidate of candidates) {
+      try {
+        const sep = candidate.url.includes('?') ? '&' : '?';
+        const res = await fetch(`${candidate.url}${sep}t=${Date.now()}`, { cache: 'no-store', redirect: 'follow' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await readWorkbookFromResponse(res, candidate);
+      } catch (err) {
+        errors.push(`${candidate.label}: ${err.message || String(err)}`);
+        console.warn('Gagal ambil Join Baru:', candidate.label, err);
+      }
+    }
+    throw new Error(`File Join Baru belum bisa diambil otomatis. Detail: ${errors.join(' | ')}. Solusi paling aman: buka file di Google Drive lalu File > Save as Google Sheets, kemudian pakai link Google Sheets hasil konversi; atau download .xlsx/.xlsb dan upload manual lewat Update Database Baru jika ingin replace.`);
+  }
+
+  async function updateJoinBaruFromLink() {
+    try {
+      state.syncing = true;
+      state.joinBaruSummary = null;
+      render();
+      const wb = await fetchJoinBaruWorkbook();
+      const parsed = parseJoinBaruRows(wb);
+      state.joinBaruRows = parsed;
+      if (!parsed.length) {
+        state.joinBaruSummary = { total: 0, added: 0, skipped: 0, invalid: 0 };
+        toast('warning', 'Join Baru kosong', 'Tidak ada data valid pada rentang tanggal tersebut.');
+        return;
+      }
+      const karyawanRows = parsed.map(x => ({ id: x.id, nama: x.nama, section: x.section, status: 'Worker', displayOrder: x.displayOrder }));
+      let added = 0;
+      let skipped = 0;
+      if (state.onlineMode) {
+        await loadKaryawan();
+        const merged = mergeKaryawanAppendBawah(state.karyawan, karyawanRows);
+        added = merged.added;
+        skipped = merged.skipped;
+        if (added) await insertMissingKaryawanRows(merged.addedRows);
+        await loadKaryawan();
+        await loadCounts();
+      } else {
+        const merged = mergeKaryawanAppendBawah(state.karyawan, karyawanRows);
+        state.karyawan = merged.rows;
+        state.totalKaryawanAll = merged.rows.length;
+        added = merged.added;
+        skipped = merged.skipped;
+        saveLocalData();
+      }
+      state.joinBaruSummary = { total: parsed.length, added, skipped, invalid: 0 };
+      toast(added ? 'success' : 'info', 'Update Join Baru selesai', `${parsed.length} data terbaca. ${added} ditambahkan di bawah database, ${skipped} sudah ada dan dilewati.`);
+    } catch (err) {
+      console.error(err);
+      showInfo('Update Join Baru gagal', err.message || String(err), 'error');
+    } finally {
+      state.syncing = false;
+      render();
+    }
+  }
+
+  function renderJoinBaruModal() {
+    const summary = state.joinBaruSummary;
+    const rows = state.joinBaruRows || [];
+    const body = rows.length ? rows.map((r, idx) => `
+      <tr class="hover:bg-slate-50">
+        <td class="p-3 text-xs text-slate-500">${idx + 1}</td>
+        <td class="p-3 font-mono text-xs">${safe(r.joindate)}</td>
+        <td class="p-3 font-mono text-xs">${safe(r.id)}</td>
+        <td class="p-3 font-bold text-slate-800">${safe(r.nama)}</td>
+        <td class="p-3 text-slate-600">${safe(r.section)}</td>
+      </tr>`).join('') : '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Belum ada data. Pilih tanggal lalu klik Ambil & Update.</td></tr>';
+    return `<div class="fixed inset-0 z-50 bg-black/50 p-3 md:p-6 flex items-center justify-center fade-in">
+      <div class="bg-white w-full max-w-5xl max-h-[92vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden pop-in">
+        <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+          <div><h3 class="font-black text-slate-800 text-lg flex items-center gap-2">${icon('refresh')} Update Join Baru</h3><p class="text-xs text-slate-500">Menambah data baru di bawah database. Mapping: Joindate=Q, No ID=D, Nama=B, Section=M.</p></div>
+          <button id="btnCloseJoinBaru" class="p-2 rounded-xl hover:bg-slate-200 text-slate-500">${icon('x', 'w-6 h-6')}</button>
+        </div>
+        <div class="p-4 border-b border-slate-100 bg-white flex flex-col lg:flex-row gap-3 lg:items-end lg:justify-between">
+          <div class="flex flex-wrap gap-3 items-end">
+            <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Dari</label><input id="joinBaruStart" type="date" value="${safe(state.joinBaruStart || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
+            <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Sampai</label><input id="joinBaruEnd" type="date" value="${safe(state.joinBaruEnd || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
+            <button id="btnFetchJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-black shadow-sm">${icon('refresh')} Ambil & Update</button>
+          </div>
+          <div class="text-xs text-slate-500 font-semibold">
+            ${summary ? `Terbaca: <b>${summary.total}</b> | Ditambah bawah: <b class="text-emerald-600">${summary.added}</b> | Sudah ada: <b class="text-amber-600">${summary.skipped}</b>` : 'Default tanggal adalah hari ini.'}
+          </div>
+        </div>
+        <div class="overflow-auto flex-1">
+          <table class="w-full text-sm text-left">
+            <thead class="bg-slate-100 sticky top-0 z-10 text-slate-600"><tr><th class="p-3 w-12">#</th><th class="p-3">Joindate</th><th class="p-3">No ID</th><th class="p-3">Nama</th><th class="p-3">Section</th></tr></thead>
+            <tbody class="divide-y">${body}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
   }
 
   async function fetchDeployedDatabaseWorkbook() {
@@ -1550,7 +1781,8 @@
               <div class="flex flex-col xl:flex-row gap-3 xl:items-end xl:justify-end">
                 <div class="flex flex-wrap items-center justify-end gap-2">
                   <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
-                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update DB Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update Database Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.xlsb,.csv" class="hidden" /></label>
+                  <button id="btnOpenJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-cyan-600 to-sky-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('refresh')} Update Join Baru</button>
                   <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileImport" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
                   <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('trash')} Reset Overtime</button>
                 </div>
@@ -1659,6 +1891,7 @@
         </div>
       </div>
       ${state.modalDbOpen ? renderDbModal() : ''}
+      ${state.joinBaruModalOpen ? renderJoinBaruModal() : ''}
     `;
 
     bindEvents();
@@ -1826,6 +2059,12 @@
     byId('btnSaveQueue')?.addEventListener('click', saveQueue);
     byId('btnClearQueue')?.addEventListener('click', clearQueue);
     byId('btnResetReport')?.addEventListener('click', resetOvertime);
+    byId('btnOpenJoinBaru')?.addEventListener('click', () => {
+      if (!state.joinBaruStart) state.joinBaruStart = todayISO();
+      if (!state.joinBaruEnd) state.joinBaruEnd = todayISO();
+      state.joinBaruModalOpen = true;
+      render();
+    });
     byId('fileDb')?.addEventListener('change', e => { importDatabaseFile(e.target.files[0]); e.target.value = ''; });
     byId('fileImport')?.addEventListener('change', e => { importLaporanFile(e.target.files[0]); e.target.value = ''; });
     byId('searchReport')?.addEventListener('input', e => { state.searchReport = e.target.value; updateReportView(); });
@@ -1860,6 +2099,12 @@
       byId('batchPinjam')?.addEventListener('input', e => { state.batchPinjam = e.target.value; });
       byId('batchShift')?.addEventListener('change', e => { state.batchShift = e.target.value; });
       byId('btnAddQueue')?.addEventListener('click', addQueue);
+    }
+    if (state.joinBaruModalOpen) {
+      byId('btnCloseJoinBaru')?.addEventListener('click', () => { state.joinBaruModalOpen = false; render(); });
+      byId('joinBaruStart')?.addEventListener('change', e => { state.joinBaruStart = validDateOrToday(e.target.value); });
+      byId('joinBaruEnd')?.addEventListener('change', e => { state.joinBaruEnd = validDateOrToday(e.target.value); });
+      byId('btnFetchJoinBaru')?.addEventListener('click', updateJoinBaruFromLink);
     }
 
     document.querySelectorAll('.btnRemoveQueue').forEach(btn => btn.addEventListener('click', () => {
