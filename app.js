@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.18.0-join-baru-date-text-toolbar-rapi'; 
+  const APP_VERSION = 'online-realtime-1.19.0-join-baru-preview-status-header-compact'; 
   const JOIN_BARU_FILE_ID = '17T58OfHzA4-ev8QMaJF6Xp6bZP2CBAdx8QKTMh3pLWU';
   const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
   const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
@@ -1698,19 +1698,25 @@
           .filter(Boolean)
       );
 
+      const previewRows = [];
       const rowsToInsert = [];
       const skippedRows = [];
 
       parsed.forEach(row => {
-        if (existingIds.has(String(row.id))) {
-          skippedRows.push(row);
+        const key = String(row.id || '').trim();
+        if (existingIds.has(key)) {
+          const item = { ...row, alreadyExists: true, joinBaruStatus: 'Sudah ada' };
+          skippedRows.push(item);
+          previewRows.push(item);
         } else {
-          existingIds.add(String(row.id));
-          rowsToInsert.push(row);
+          existingIds.add(key);
+          const item = { ...row, alreadyExists: false, joinBaruStatus: 'Siap masuk' };
+          rowsToInsert.push(item);
+          previewRows.push(item);
         }
       });
 
-      state.joinBaruRows = rowsToInsert;
+      state.joinBaruRows = previewRows;
       state.joinBaruSummary = {
         total: parsed.length,
         added: rowsToInsert.length,
@@ -1722,9 +1728,9 @@
       if (!parsed.length) {
         toast('warning', 'Join Baru kosong', 'Tidak ada data valid pada rentang tanggal tersebut.');
       } else if (!rowsToInsert.length) {
-        toast('info', 'Tidak ada data baru', `${parsed.length} data terbaca, semuanya sudah ada di database.`);
+        toast('info', 'Tidak ada data baru', `${parsed.length} data terbaca, semuanya sudah ada di database. Data tetap ditampilkan di tabel dengan status Sudah ada.`);
       } else {
-        toast('success', 'Preview Join Baru siap', `${rowsToInsert.length} data baru siap masuk database. Periksa tabel lalu tekan Update Database.`);
+        toast('success', 'Preview Join Baru siap', `${rowsToInsert.length} data baru siap masuk database. ${skippedRows.length} data sudah ada tetap ditampilkan.`);
       }
       setJoinBaruProgress('Selesai. Silakan periksa hasil preview.');
     } catch (err) {
@@ -1738,10 +1744,15 @@
 
   async function commitJoinBaruRows() {
     try {
-      const rows = state.joinBaruRows || [];
+      const previewRows = state.joinBaruRows || [];
+      const rows = previewRows.filter(row => !row.alreadyExists);
+
+      if (!previewRows.length) {
+        return showInfo('Tidak ada data preview', 'Klik Ambil Data dulu. Data yang terbaca akan tampil di tabel, termasuk yang sudah ada di database.', 'warning');
+      }
 
       if (!rows.length) {
-        return showInfo('Tidak ada data baru', 'Klik Ambil Data dulu. Jika tabel kosong, berarti semua ID sudah ada di database.', 'warning');
+        return showInfo('Tidak ada data baru', 'Semua data pada tabel preview sudah ada di database, jadi tidak ada yang perlu diinsert ulang.', 'warning');
       }
 
       state.syncing = true;
@@ -1849,18 +1860,28 @@
   function renderJoinBaruModal() {
     const summary = state.joinBaruSummary;
     const rows = state.joinBaruRows || [];
-    const body = rows.length ? rows.map((r, idx) => `
-      <tr class="hover:bg-slate-50">
+    const readyRows = rows.filter(r => !r.alreadyExists);
+    const body = rows.length ? rows.map((r, idx) => {
+      const already = !!r.alreadyExists;
+      const statusLabel = r.joinBaruStatus || (already ? 'Sudah ada' : 'Siap masuk');
+      const rowClass = already ? 'bg-amber-50/40 hover:bg-amber-50' : 'hover:bg-slate-50';
+      const badgeClass = already
+        ? 'border-amber-200 bg-amber-50 text-amber-700'
+        : 'border-emerald-200 bg-emerald-50 text-emerald-700';
+      return `
+      <tr class="${rowClass}">
         <td class="p-3 text-xs text-slate-500">${idx + 1}</td>
         <td class="p-3 font-mono text-xs">${safe(r.joindate)}</td>
         <td class="p-3 font-mono text-xs">${safe(r.id)}</td>
         <td class="p-3 font-bold text-slate-800">${safe(r.nama)}</td>
         <td class="p-3 text-slate-600">${safe(r.section)}</td>
-      </tr>`).join('') : '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Belum ada data. Pilih tanggal lalu klik Ambil Data. Data akan tampil dulu di sini sebelum masuk database.</td></tr>';
+        <td class="p-3"><span class="inline-flex items-center rounded-full border px-2 py-1 text-[11px] font-black ${badgeClass}">${safe(statusLabel)}</span></td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="6" class="p-8 text-center text-slate-400 italic">Belum ada data. Pilih tanggal lalu klik Ambil Data. Data akan tampil dulu di sini sebelum masuk database.</td></tr>';
     return `<div class="fixed inset-0 z-50 bg-black/50 p-3 md:p-6 flex items-center justify-center fade-in">
       <div class="bg-white w-full max-w-5xl max-h-[92vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden pop-in">
         <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-          <div><h3 class="font-black text-slate-800 text-lg flex items-center gap-2">${icon('refresh')} Update Join Baru</h3><p class="text-xs text-slate-500">Preview dulu data baru yang akan masuk database. Mapping: Joindate=Q, No ID=D, Nama=B, Section=M. Section IDIN otomatis diubah ke format M-A01(BR/PT).</p></div>
+          <div><h3 class="font-black text-slate-800 text-lg flex items-center gap-2">${icon('refresh')} Update Join Baru</h3><p class="text-xs text-slate-500">Preview dulu data join baru yang terbaca dari Google Sheet. Data yang sudah ada tetap tampil di tabel, tetapi tidak akan diinsert ulang.</p></div>
           <button id="btnCloseJoinBaru" class="p-2 rounded-xl hover:bg-slate-200 text-slate-500">${icon('x', 'w-6 h-6')}</button>
         </div>
         <div class="p-4 border-b border-slate-100 bg-white flex flex-col lg:flex-row gap-3 lg:items-end lg:justify-between">
@@ -1868,19 +1889,19 @@
             <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Dari</label><input id="joinBaruStart" type="date" value="${safe(state.joinBaruStart || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
             <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Sampai</label><input id="joinBaruEnd" type="date" value="${safe(state.joinBaruEnd || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
             <button id="btnFetchJoinBaru" ${state.syncing ? 'disabled' : ''} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${state.syncing ? 'bg-cyan-300 cursor-wait' : 'bg-cyan-600 hover:bg-cyan-700'} text-white text-sm font-black shadow-sm">${icon('refresh')} ${state.syncing ? 'Memproses...' : 'Ambil Data'}</button>
-          <button id="btnCommitJoinBaru" ${rows.length && !state.syncing ? '' : 'disabled'} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${rows.length && !state.syncing ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm' : 'bg-slate-200 text-slate-400 cursor-not-allowed'} text-sm font-black">${icon('save')} Update Database</button>
+            <button id="btnCommitJoinBaru" ${readyRows.length && !state.syncing ? '' : 'disabled'} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${readyRows.length && !state.syncing ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm' : 'bg-slate-200 text-slate-400 cursor-not-allowed'} text-sm font-black">${icon('save')} Update Database</button>
           </div>
           <div class="text-xs text-slate-500 font-semibold">
             ${summary ? `Terbaca: <b>${summary.total}</b> | Siap masuk: <b class="text-emerald-600">${summary.added}</b> | Sudah ada: <b class="text-amber-600">${summary.skipped}</b>` : 'Default tanggal adalah hari ini.'}
           </div>
         </div>
         <div id="joinBaruProgressBox" class="${state.joinBaruProgress ? 'flex' : 'hidden'} mx-4 mt-3 mb-1 items-center gap-3 rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800 font-bold">
-          <span class="inline-block w-4 h-4 rounded-full border-2 border-cyan-600 border-t-transparent animate-spin"></span>
+          ${state.syncing ? '<span class="inline-block w-4 h-4 rounded-full border-2 border-cyan-600 border-t-transparent animate-spin"></span>' : icon('check', 'w-4 h-4 text-cyan-700')}
           <span id="joinBaruProgressText">${safe(state.joinBaruProgress || '')}</span>
         </div>
         <div class="overflow-auto flex-1">
           <table class="w-full text-sm text-left">
-            <thead class="bg-slate-100 sticky top-0 z-10 text-slate-600"><tr><th class="p-3 w-12">#</th><th class="p-3">Joindate</th><th class="p-3">No ID</th><th class="p-3">Nama</th><th class="p-3">Section</th></tr></thead>
+            <thead class="bg-slate-100 sticky top-0 z-10 text-slate-600"><tr><th class="p-3 w-12">#</th><th class="p-3">Joindate</th><th class="p-3">No ID</th><th class="p-3">Nama</th><th class="p-3">Section</th><th class="p-3">Status</th></tr></thead>
             <tbody class="divide-y">${body}</tbody>
           </table>
         </div>
@@ -2094,32 +2115,32 @@
       worker: state.karyawan.filter(i => normalizeStatus(i.status) === 'Worker').length,
       staff: state.karyawan.filter(i => normalizeStatus(i.status) === 'Staff').length
     };
-    const topActionButtonClass = 'inline-flex h-10 items-center justify-center gap-2 rounded-2xl px-4 text-xs font-black text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg whitespace-nowrap';
+    const topActionButtonClass = 'inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-3 text-[11px] font-black text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg whitespace-nowrap';
 
     root.innerHTML = `
       <div class="min-h-screen p-3 md:p-6">
         <div class="max-w-[1500px] mx-auto space-y-5">
           <header class="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
-            <div class="p-4 md:p-5 border-b border-slate-100 flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
-              <div class="flex items-center gap-4">
-                <img src="${safe(getLogoSrc())}" alt="Logo" class="w-16 h-16 rounded-2xl object-contain bg-white border border-slate-200 shadow-sm" />
-                <div>
+            <div class="p-4 md:p-5 border-b border-slate-100 flex flex-col xl:flex-row gap-4 xl:items-center xl:justify-between">
+              <div class="flex items-center gap-4 min-w-0">
+                <img src="${safe(getLogoSrc())}" alt="Logo" class="w-14 h-14 md:w-16 md:h-16 rounded-2xl object-contain bg-white border border-slate-200 shadow-sm shrink-0" />
+                <div class="min-w-0">
                   <div class="flex flex-wrap items-center gap-2 mb-1">${statusBadge()} <span id="onlineUsersBadgeWrap">${onlineUsersBadge()}</span> ${state.syncing ? '<span class="text-xs text-blue-600 font-bold">Sync...</span>' : ''}</div>
-                  <h1 class="text-2xl md:text-3xl font-black text-slate-900">${safe(cfg.COMPANY_NAME || 'PT Hop Lun Indonesia')}</h1>
+                  <h1 class="text-2xl md:text-3xl font-black text-slate-900 leading-tight break-words">${safe(cfg.COMPANY_NAME || 'PT Hop Lun Indonesia')}</h1>
                   <p class="text-sm text-slate-500">Input Lembur Karyawan - ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
                 </div>
               </div>
-              <div class="w-full lg:w-auto flex flex-col 2xl:flex-row gap-3 2xl:items-end 2xl:justify-end">
-                <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-5 gap-2 w-full 2xl:w-auto">
+              <div class="w-full xl:w-[760px] 2xl:w-[860px] flex flex-col gap-2 xl:items-end">
+                <div class="w-full sm:w-56">
+                  <label class="block text-[10px] uppercase font-black text-slate-400 sm:text-right">Penginput</label>
+                  <input id="inputNama" class="w-full mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" value="${safe(state.namaPenginput)}" placeholder="Nama Anda" />
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 w-full">
                   <button id="btnTemplate" class="${topActionButtonClass} bg-gradient-to-r from-slate-700 to-slate-900">${icon('download')} Template DB</button>
                   <label class="${topActionButtonClass} bg-gradient-to-r from-blue-600 to-blue-700 cursor-pointer">${icon('upload')} Update Database Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.xlsb,.csv" class="hidden" /></label>
                   <button id="btnOpenJoinBaru" class="${topActionButtonClass} bg-gradient-to-r from-cyan-600 to-sky-700">${icon('refresh')} Update Join Baru</button>
                   <label class="${topActionButtonClass} bg-gradient-to-r from-emerald-600 to-green-700 cursor-pointer">${icon('upload')} Import Data<input id="fileImport" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
                   <button id="btnResetReport" class="${topActionButtonClass} bg-gradient-to-r from-red-600 to-rose-700">${icon('trash')} Reset Overtime</button>
-                </div>
-                <div class="w-full 2xl:w-56">
-                  <label class="block text-[10px] uppercase font-black text-slate-400 2xl:text-right">Penginput</label>
-                  <input id="inputNama" class="w-full mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" value="${safe(state.namaPenginput)}" placeholder="Nama Anda" />
                 </div>
               </div>
             </div>
