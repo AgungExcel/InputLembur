@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.14.0-join-baru-drive-download'; 
+  const APP_VERSION = 'online-realtime-1.15.0-join-baru-preview-no-duplicate-section-idin'; 
   const JOIN_BARU_FILE_ID = '17T58OfHzA4-ev8QMaJF6Xp6bZP2CBAdx8QKTMh3pLWU';
   const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
   const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
@@ -1406,11 +1406,43 @@
     } catch { return ''; }
   }
 
+  function dateObjectToISODateLocal(d) {
+    if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+    return `${String(d.getFullYear()).padStart(4, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function normalizeJoinBaruSection(value) {
+    const raw = cleanText(value);
+    const upper = raw.toUpperCase();
+
+    // Pola:
+    // IDIN-1-1-01T-A => M-A01(BR)
+    // IDIN-1-1-01B-A => M-A01(PT)
+    // IDIN-1-1-01T-B => M-B01(BR)
+    // IDIN-1-1-01B-B => M-B01(PT)
+    const match = upper.match(/^IDIN-\d+-\d+-(\d+)([TB])-([A-Z])$/);
+    if (!match) return raw;
+
+    const nomor = match[1].padStart(2, '0');
+    const tipe = match[2] === 'T' ? 'BR' : 'PT';
+    const line = match[3];
+
+    return `M-${line}${nomor}(${tipe})`;
+  }
+
   function normalizeDateCell(value) {
-    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+    // Jangan pakai toISOString() untuk Date Excel karena bisa geser tanggal akibat timezone.
+    // Pakai komponen tanggal lokal browser.
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      return dateObjectToISODateLocal(value);
+    }
+
     const raw = cleanText(value, true);
     if (!raw) return '';
+
     if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+
+    // Format umum Indonesia: DD/MM/YYYY atau DD-MM-YYYY.
     if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(raw)) {
       const parts = raw.split(/[\/-]/);
       const d = parts[0].padStart(2, '0');
@@ -1418,6 +1450,7 @@
       const y = parts[2].length === 2 ? `20${parts[2]}` : parts[2].padStart(4, '0');
       return `${y}-${m}-${d}`;
     }
+
     return excelSerialToISO(raw) || '';
   }
 
@@ -1430,20 +1463,44 @@
     const sheetName = wb.SheetNames[0];
     const sheet = sheetName ? wb.Sheets[sheetName] : null;
     if (!sheet || !sheet['!ref']) return [];
+
     const range = XLSX.utils.decode_range(sheet['!ref']);
     const dates = orderedDates(state.joinBaruStart || todayISO(), state.joinBaruEnd || todayISO());
     const map = new Map();
+
     for (let r = range.s.r; r <= range.e.r; r++) {
+      // Mapping kolom file Join Baru:
+      // Joindate = Q = index 16
+      // No ID    = D = index 3
+      // Nama     = B = index 1
+      // Section  = M = index 12
       const joindate = normalizeDateCell(getRawCellValue(sheet, r, 16) || getCellText(sheet, r, 16));
       const id = cleanText(getCellText(sheet, r, 3));
       const nama = cleanText(getCellText(sheet, r, 1));
-      const section = cleanText(getCellText(sheet, r, 12));
+      const sectionRaw = cleanText(getCellText(sheet, r, 12));
+      const section = normalizeJoinBaruSection(sectionRaw);
+
       const k = { id, nama, section, status: 'Worker', displayOrder: r + 1 };
+
       if (!joindate || joindate < dates.start || joindate > dates.end) continue;
       if (isInvalidKaryawanRow(k)) continue;
-      map.set(String(id), { joindate, id, nama, section, status: 'Worker', displayOrder: r + 1 });
+
+      // Cegah data ganda dari file sumber berdasarkan ID.
+      if (!map.has(String(id))) {
+        map.set(String(id), {
+          joindate,
+          id,
+          nama,
+          section,
+          status: 'Worker',
+          displayOrder: r + 1
+        });
+      }
     }
-    return Array.from(map.values()).sort((a, b) => a.joindate.localeCompare(b.joindate) || (a.displayOrder || 0) - (b.displayOrder || 0));
+
+    return Array.from(map.values()).sort((a, b) =>
+      a.joindate.localeCompare(b.joindate) || (a.displayOrder || 0) - (b.displayOrder || 0)
+    );
   }
 
   async function readWorkbookFromResponse(res, candidate) {
@@ -1478,40 +1535,157 @@
     throw new Error(`File Join Baru belum bisa diambil otomatis. Detail: ${errors.join(' | ')}. Solusi paling aman: buka file di Google Drive lalu File > Save as Google Sheets, kemudian pakai link Google Sheets hasil konversi; atau download .xlsx/.xlsb dan upload manual lewat Update Database Baru jika ingin replace.`);
   }
 
-  async function updateJoinBaruFromLink() {
+  async function previewJoinBaruFromLink() {
     try {
       state.syncing = true;
       state.joinBaruSummary = null;
+      state.joinBaruRows = [];
       render();
+
       const wb = await fetchJoinBaruWorkbook();
       const parsed = parseJoinBaruRows(wb);
-      state.joinBaruRows = parsed;
-      if (!parsed.length) {
-        state.joinBaruSummary = { total: 0, added: 0, skipped: 0, invalid: 0 };
-        toast('warning', 'Join Baru kosong', 'Tidak ada data valid pada rentang tanggal tersebut.');
-        return;
-      }
-      const karyawanRows = parsed.map(x => ({ id: x.id, nama: x.nama, section: x.section, status: 'Worker', displayOrder: x.displayOrder }));
-      let added = 0;
-      let skipped = 0;
+
       if (state.onlineMode) {
         await loadKaryawan();
-        const merged = mergeKaryawanAppendBawah(state.karyawan, karyawanRows);
-        added = merged.added;
-        skipped = merged.skipped;
-        if (added) await insertMissingKaryawanRows(merged.addedRows);
+      }
+
+      const existingIds = new Set(
+        sanitizeKaryawanRows(state.karyawan || [])
+          .map(k => String(k.id || '').trim())
+          .filter(Boolean)
+      );
+
+      const rowsToInsert = [];
+      const skippedRows = [];
+
+      parsed.forEach(row => {
+        if (existingIds.has(String(row.id))) {
+          skippedRows.push(row);
+        } else {
+          existingIds.add(String(row.id));
+          rowsToInsert.push(row);
+        }
+      });
+
+      state.joinBaruRows = rowsToInsert;
+      state.joinBaruSummary = {
+        total: parsed.length,
+        added: rowsToInsert.length,
+        skipped: skippedRows.length,
+        invalid: 0,
+        previewOnly: true
+      };
+
+      if (!parsed.length) {
+        toast('warning', 'Join Baru kosong', 'Tidak ada data valid pada rentang tanggal tersebut.');
+      } else if (!rowsToInsert.length) {
+        toast('info', 'Tidak ada data baru', `${parsed.length} data terbaca, semuanya sudah ada di database.`);
+      } else {
+        toast('success', 'Preview Join Baru siap', `${rowsToInsert.length} data baru siap masuk database. Periksa tabel lalu tekan Update Database.`);
+      }
+    } catch (err) {
+      console.error(err);
+      showInfo('Ambil Join Baru gagal', err.message || String(err), 'error');
+    } finally {
+      state.syncing = false;
+      render();
+    }
+  }
+
+  async function commitJoinBaruRows() {
+    try {
+      const rows = state.joinBaruRows || [];
+
+      if (!rows.length) {
+        return showInfo('Tidak ada data baru', 'Klik Ambil Data dulu. Jika tabel kosong, berarti semua ID sudah ada di database.', 'warning');
+      }
+
+      state.syncing = true;
+      render();
+
+      if (state.onlineMode) {
+        await loadKaryawan();
+
+        const existingIds = new Set(
+          sanitizeKaryawanRows(state.karyawan || [])
+            .map(k => String(k.id || '').trim())
+            .filter(Boolean)
+        );
+
+        // Cek ulang tepat sebelum insert supaya tidak ada data ganda jika user lain update bersamaan.
+        const finalRows = rows.filter(row => !existingIds.has(String(row.id)));
+
+        if (finalRows.length) {
+          await insertMissingKaryawanRows(finalRows.map(row => ({
+            id: row.id,
+            nama: row.nama,
+            section: row.section,
+            status: 'Worker',
+            displayOrder: row.displayOrder
+          })));
+        }
+
         await loadKaryawan();
         await loadCounts();
+
+        const skippedNow = rows.length - finalRows.length;
+        state.joinBaruRows = [];
+        state.joinBaruSummary = {
+          ...(state.joinBaruSummary || {}),
+          added: finalRows.length,
+          skipped: Number(state.joinBaruSummary?.skipped || 0) + skippedNow,
+          previewOnly: false
+        };
+
+        toast(
+          finalRows.length ? 'success' : 'info',
+          'Update Join Baru selesai',
+          `${finalRows.length} data baru masuk database. ${skippedNow} data batal karena sudah ada.`
+        );
       } else {
-        const merged = mergeKaryawanAppendBawah(state.karyawan, karyawanRows);
-        state.karyawan = merged.rows;
-        state.totalKaryawanAll = merged.rows.length;
-        added = merged.added;
-        skipped = merged.skipped;
+        const existingIds = new Set(
+          sanitizeKaryawanRows(state.karyawan || [])
+            .map(k => String(k.id || '').trim())
+            .filter(Boolean)
+        );
+
+        const maxOrder = (state.karyawan || []).reduce((max, k, idx) => {
+          return Math.max(max, normalizeDisplayOrder(k.displayOrder) || (idx + 1));
+        }, 0);
+
+        const finalRows = [];
+        rows.forEach(row => {
+          if (!existingIds.has(String(row.id))) {
+            existingIds.add(String(row.id));
+            finalRows.push({
+              id: row.id,
+              nama: row.nama,
+              section: row.section,
+              status: 'Worker',
+              displayOrder: maxOrder + finalRows.length + 1
+            });
+          }
+        });
+
+        state.karyawan = sanitizeKaryawanRows([...(state.karyawan || []), ...finalRows]);
+        state.totalKaryawanAll = state.karyawan.length;
         saveLocalData();
+
+        const skippedNow = rows.length - finalRows.length;
+        state.joinBaruRows = [];
+        state.joinBaruSummary = {
+          ...(state.joinBaruSummary || {}),
+          added: finalRows.length,
+          skipped: Number(state.joinBaruSummary?.skipped || 0) + skippedNow,
+          previewOnly: false
+        };
+
+        toast(
+          finalRows.length ? 'success' : 'info',
+          'Update Join Baru selesai',
+          `${finalRows.length} data baru masuk database lokal. ${skippedNow} data batal karena sudah ada.`
+        );
       }
-      state.joinBaruSummary = { total: parsed.length, added, skipped, invalid: 0 };
-      toast(added ? 'success' : 'info', 'Update Join Baru selesai', `${parsed.length} data terbaca. ${added} ditambahkan di bawah database, ${skipped} sudah ada dan dilewati.`);
     } catch (err) {
       console.error(err);
       showInfo('Update Join Baru gagal', err.message || String(err), 'error');
@@ -1531,21 +1705,22 @@
         <td class="p-3 font-mono text-xs">${safe(r.id)}</td>
         <td class="p-3 font-bold text-slate-800">${safe(r.nama)}</td>
         <td class="p-3 text-slate-600">${safe(r.section)}</td>
-      </tr>`).join('') : '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Belum ada data. Pilih tanggal lalu klik Ambil & Update.</td></tr>';
+      </tr>`).join('') : '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Belum ada data. Pilih tanggal lalu klik Ambil Data. Data akan tampil dulu di sini sebelum masuk database.</td></tr>';
     return `<div class="fixed inset-0 z-50 bg-black/50 p-3 md:p-6 flex items-center justify-center fade-in">
       <div class="bg-white w-full max-w-5xl max-h-[92vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden pop-in">
         <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-          <div><h3 class="font-black text-slate-800 text-lg flex items-center gap-2">${icon('refresh')} Update Join Baru</h3><p class="text-xs text-slate-500">Menambah data baru di bawah database. Mapping: Joindate=Q, No ID=D, Nama=B, Section=M.</p></div>
+          <div><h3 class="font-black text-slate-800 text-lg flex items-center gap-2">${icon('refresh')} Update Join Baru</h3><p class="text-xs text-slate-500">Preview dulu data baru yang akan masuk database. Mapping: Joindate=Q, No ID=D, Nama=B, Section=M. Section IDIN otomatis diubah ke format M-A01(BR/PT).</p></div>
           <button id="btnCloseJoinBaru" class="p-2 rounded-xl hover:bg-slate-200 text-slate-500">${icon('x', 'w-6 h-6')}</button>
         </div>
         <div class="p-4 border-b border-slate-100 bg-white flex flex-col lg:flex-row gap-3 lg:items-end lg:justify-between">
           <div class="flex flex-wrap gap-3 items-end">
             <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Dari</label><input id="joinBaruStart" type="date" value="${safe(state.joinBaruStart || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
             <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Sampai</label><input id="joinBaruEnd" type="date" value="${safe(state.joinBaruEnd || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
-            <button id="btnFetchJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-black shadow-sm">${icon('refresh')} Ambil & Update</button>
+            <button id="btnFetchJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-black shadow-sm">${icon('refresh')} Ambil Data</button>
+          <button id="btnCommitJoinBaru" ${rows.length ? '' : 'disabled'} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${rows.length ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm' : 'bg-slate-200 text-slate-400 cursor-not-allowed'} text-sm font-black">${icon('save')} Update Database</button>
           </div>
           <div class="text-xs text-slate-500 font-semibold">
-            ${summary ? `Terbaca: <b>${summary.total}</b> | Ditambah bawah: <b class="text-emerald-600">${summary.added}</b> | Sudah ada: <b class="text-amber-600">${summary.skipped}</b>` : 'Default tanggal adalah hari ini.'}
+            ${summary ? `Terbaca: <b>${summary.total}</b> | Siap masuk: <b class="text-emerald-600">${summary.added}</b> | Sudah ada: <b class="text-amber-600">${summary.skipped}</b>` : 'Default tanggal adalah hari ini.'}
           </div>
         </div>
         <div class="overflow-auto flex-1">
@@ -2104,7 +2279,8 @@
       byId('btnCloseJoinBaru')?.addEventListener('click', () => { state.joinBaruModalOpen = false; render(); });
       byId('joinBaruStart')?.addEventListener('change', e => { state.joinBaruStart = validDateOrToday(e.target.value); });
       byId('joinBaruEnd')?.addEventListener('change', e => { state.joinBaruEnd = validDateOrToday(e.target.value); });
-      byId('btnFetchJoinBaru')?.addEventListener('click', updateJoinBaruFromLink);
+      byId('btnFetchJoinBaru')?.addEventListener('click', previewJoinBaruFromLink);
+      byId('btnCommitJoinBaru')?.addEventListener('click', commitJoinBaruRows);
     }
 
     document.querySelectorAll('.btnRemoveQueue').forEach(btn => btn.addEventListener('click', () => {
