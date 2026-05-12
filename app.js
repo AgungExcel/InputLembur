@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.17.0-join-baru-offset-progress-visible'; 
+  const APP_VERSION = 'online-realtime-1.18.0-join-baru-date-text-toolbar-rapi'; 
   const JOIN_BARU_FILE_ID = '17T58OfHzA4-ev8QMaJF6Xp6bZP2CBAdx8QKTMh3pLWU';
   const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
   const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
@@ -1479,6 +1479,45 @@
     if (!list.includes(v)) list.push(v);
   }
 
+  function monthNameToNumber(value) {
+    const key = cleanText(value, true).toLowerCase().replace(/\./g, '').slice(0, 3);
+    const months = {
+      jan: '01', feb: '02', mar: '03', apr: '04', mei: '05', may: '05',
+      jun: '06', jul: '07', agu: '08', aug: '08', sep: '09', okt: '10',
+      oct: '10', nov: '11', des: '12', dec: '12'
+    };
+    return months[key] || '';
+  }
+
+  function normalizeYearText(value) {
+    const raw = cleanText(value, true);
+    if (!/^\d{2,4}$/.test(raw)) return '';
+    return raw.length === 2 ? `20${raw}` : raw.padStart(4, '0');
+  }
+
+  function addNamedMonthDateCandidates(out, value) {
+    const raw = cleanText(value, true).replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!raw) return;
+
+    // Format dari Google Sheet/CSV sering muncul seperti: 12-May-2026, 12 Mei 2026, May 12 2026.
+    let match = raw.match(/^(\d{1,2})\s*[-\/. ]\s*([A-Za-zÀ-ÿ]+)\s*[-\/. ]\s*(\d{2,4})(?:\s+.*)?$/i);
+    if (match) {
+      const d = match[1].padStart(2, '0');
+      const m = monthNameToNumber(match[2]);
+      const y = normalizeYearText(match[3]);
+      if (m && y) addDateCandidate(out, `${y}-${m}-${d}`);
+      return;
+    }
+
+    match = raw.match(/^([A-Za-zÀ-ÿ]+)\s*[-\/. ]\s*(\d{1,2})\s*[-\/. ]\s*(\d{2,4})(?:\s+.*)?$/i);
+    if (match) {
+      const m = monthNameToNumber(match[1]);
+      const d = match[2].padStart(2, '0');
+      const y = normalizeYearText(match[3]);
+      if (m && y) addDateCandidate(out, `${y}-${m}-${d}`);
+    }
+  }
+
   function dateTextCandidates(value) {
     const raw = cleanText(value, true);
     const out = [];
@@ -1488,6 +1527,9 @@
       addDateCandidate(out, raw);
       return out;
     }
+
+    addNamedMonthDateCandidates(out, raw);
+    if (out.length) return out;
 
     if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(raw)) {
       const parts = raw.split(/[\/-]/);
@@ -2052,6 +2094,7 @@
       worker: state.karyawan.filter(i => normalizeStatus(i.status) === 'Worker').length,
       staff: state.karyawan.filter(i => normalizeStatus(i.status) === 'Staff').length
     };
+    const topActionButtonClass = 'inline-flex h-10 items-center justify-center gap-2 rounded-2xl px-4 text-xs font-black text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg whitespace-nowrap';
 
     root.innerHTML = `
       <div class="min-h-screen p-3 md:p-6">
@@ -2066,17 +2109,17 @@
                   <p class="text-sm text-slate-500">Input Lembur Karyawan - ${safe(cfg.APP_NAME || 'Aplikasi Online')}</p>
                 </div>
               </div>
-              <div class="flex flex-col xl:flex-row gap-3 xl:items-end xl:justify-end">
-                <div class="flex flex-wrap items-center justify-end gap-2">
-                  <button id="btnTemplate" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-slate-700 to-slate-900 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('download')} Template DB</button>
-                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Update Database Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.xlsb,.csv" class="hidden" /></label>
-                  <button id="btnOpenJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-cyan-600 to-sky-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('refresh')} Update Join Baru</button>
-                  <label class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-green-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition cursor-pointer">${icon('upload')} Import Data<input id="fileImport" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
-                  <button id="btnResetReport" class="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 to-rose-700 text-white text-xs font-black shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition">${icon('trash')} Reset Overtime</button>
+              <div class="w-full lg:w-auto flex flex-col 2xl:flex-row gap-3 2xl:items-end 2xl:justify-end">
+                <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-5 gap-2 w-full 2xl:w-auto">
+                  <button id="btnTemplate" class="${topActionButtonClass} bg-gradient-to-r from-slate-700 to-slate-900">${icon('download')} Template DB</button>
+                  <label class="${topActionButtonClass} bg-gradient-to-r from-blue-600 to-blue-700 cursor-pointer">${icon('upload')} Update Database Baru<input id="fileDb" type="file" accept=".xlsx,.xls,.xlsb,.csv" class="hidden" /></label>
+                  <button id="btnOpenJoinBaru" class="${topActionButtonClass} bg-gradient-to-r from-cyan-600 to-sky-700">${icon('refresh')} Update Join Baru</button>
+                  <label class="${topActionButtonClass} bg-gradient-to-r from-emerald-600 to-green-700 cursor-pointer">${icon('upload')} Import Data<input id="fileImport" type="file" accept=".xlsx,.xls,.csv" class="hidden" /></label>
+                  <button id="btnResetReport" class="${topActionButtonClass} bg-gradient-to-r from-red-600 to-rose-700">${icon('trash')} Reset Overtime</button>
                 </div>
-                <div>
-                  <label class="block text-[10px] uppercase font-black text-slate-400 text-right">Penginput</label>
-                  <input id="inputNama" class="w-full sm:w-56 mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" value="${safe(state.namaPenginput)}" placeholder="Nama Anda" />
+                <div class="w-full 2xl:w-56">
+                  <label class="block text-[10px] uppercase font-black text-slate-400 2xl:text-right">Penginput</label>
+                  <input id="inputNama" class="w-full mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" value="${safe(state.namaPenginput)}" placeholder="Nama Anda" />
                 </div>
               </div>
             </div>
