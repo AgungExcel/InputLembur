@@ -1,8 +1,8 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.14.0-join-baru-drive-download';
-  const JOIN_BARU_FILE_ID = '176jG2q02uaZUpdz7ZHQMnuCrIJ6FFPqW';
+  const APP_VERSION = 'online-realtime-1.14.0-join-baru-drive-download'; 
+  const JOIN_BARU_FILE_ID = '17T58OfHzA4-ev8QMaJF6Xp6bZP2CBAdx8QKTMh3pLWU';
   const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
   const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
   const root = document.getElementById('root');
