@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = 'online-realtime-1.15.0-join-baru-preview-no-duplicate-section-idin'; 
+  const APP_VERSION = 'online-realtime-1.17.0-join-baru-offset-progress-visible'; 
   const JOIN_BARU_FILE_ID = '17T58OfHzA4-ev8QMaJF6Xp6bZP2CBAdx8QKTMh3pLWU';
   const JOIN_BARU_EXPORT_URL = `https://docs.google.com/spreadsheets/d/${JOIN_BARU_FILE_ID}/export?format=xlsx`;
   const JOIN_BARU_DRIVE_DOWNLOAD_URL = `https://drive.google.com/uc?export=download&id=${JOIN_BARU_FILE_ID}`;
@@ -82,7 +82,8 @@
     joinBaruStart: todayISO(),
     joinBaruEnd: todayISO(),
     joinBaruRows: [],
-    joinBaruSummary: null
+    joinBaruSummary: null,
+    joinBaruProgress: ''
   };
 
   const icons = {
@@ -1411,6 +1412,25 @@
     return `${String(d.getFullYear()).padStart(4, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
+  function dateObjectToISODateUTC(d) {
+    if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+    return `${String(d.getUTCFullYear()).padStart(4, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  }
+
+  function addDaysISO(dateStr, days) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr || ''))) return '';
+    const d = new Date(`${dateStr}T12:00:00`);
+    d.setDate(d.getDate() + Number(days || 0));
+    return dateObjectToISODateLocal(d);
+  }
+
+  function joinBaruDateOffsetDays() {
+    // Default -1 karena file Join Baru yang diambil dari Google/Drive terbaca maju 1 hari di browser.
+    // Jika file sumber sudah normal, bisa override di config.js: JOIN_BARU_DATE_OFFSET_DAYS: 0
+    const n = Number(cfg.JOIN_BARU_DATE_OFFSET_DAYS ?? -1);
+    return Number.isFinite(n) ? n : -1;
+  }
+
   function normalizeJoinBaruSection(value) {
     const raw = cleanText(value);
     const upper = raw.toUpperCase();
@@ -1431,10 +1451,10 @@
   }
 
   function normalizeDateCell(value) {
-    // Jangan pakai toISOString() untuk Date Excel karena bisa geser tanggal akibat timezone.
-    // Pakai komponen tanggal lokal browser.
+    // Fungsi umum. Untuk Join Baru, parse tanggal memakai getJoinDateCandidates()
+    // supaya bisa memilih kandidat tanggal yang benar sesuai rentang user.
     if (value instanceof Date && !Number.isNaN(value.getTime())) {
-      return dateObjectToISODateLocal(value);
+      return dateObjectToISODateUTC(value) || dateObjectToISODateLocal(value);
     }
 
     const raw = cleanText(value, true);
@@ -1442,7 +1462,6 @@
 
     if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
 
-    // Format umum Indonesia: DD/MM/YYYY atau DD-MM-YYYY.
     if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(raw)) {
       const parts = raw.split(/[\/-]/);
       const d = parts[0].padStart(2, '0');
@@ -1452,6 +1471,78 @@
     }
 
     return excelSerialToISO(raw) || '';
+  }
+
+  function addDateCandidate(list, value) {
+    const v = cleanText(value, true);
+    if (!v) return;
+    if (!list.includes(v)) list.push(v);
+  }
+
+  function dateTextCandidates(value) {
+    const raw = cleanText(value, true);
+    const out = [];
+    if (!raw) return out;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      addDateCandidate(out, raw);
+      return out;
+    }
+
+    if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(raw)) {
+      const parts = raw.split(/[\/-]/);
+      const a = parts[0].padStart(2, '0');
+      const b = parts[1].padStart(2, '0');
+      const y = parts[2].length === 2 ? `20${parts[2]}` : parts[2].padStart(4, '0');
+
+      // Kandidat 1: DD/MM/YYYY.
+      addDateCandidate(out, `${y}-${b}-${a}`);
+      // Kandidat 2: MM/DD/YYYY, sering muncul dari Google/Browser seperti 05/11/2026.
+      addDateCandidate(out, `${y}-${a}-${b}`);
+      return out;
+    }
+
+    addDateCandidate(out, excelSerialToISO(raw));
+    return out;
+  }
+
+  function getJoinDateCandidates(sheet, r, c) {
+    const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+    const candidates = [];
+    if (!cell) return candidates;
+
+    // Utamakan tampilan cell (cell.w). Untuk raw Date/serial, tambahkan versi offset -1 hari dulu.
+    // Ini memperbaiki kasus user pilih tanggal 11 tetapi raw Excel/Google terbaca tanggal 12.
+    dateTextCandidates(cell.w).forEach(v => addDateCandidate(candidates, v));
+
+    if (cell.v instanceof Date && !Number.isNaN(cell.v.getTime())) {
+      const utc = dateObjectToISODateUTC(cell.v);
+      const local = dateObjectToISODateLocal(cell.v);
+      addDateCandidate(candidates, addDaysISO(utc, joinBaruDateOffsetDays()));
+      addDateCandidate(candidates, addDaysISO(local, joinBaruDateOffsetDays()));
+      addDateCandidate(candidates, utc);
+      addDateCandidate(candidates, local);
+    } else {
+      const rawCandidates = dateTextCandidates(cell.v);
+      rawCandidates.forEach(v => addDateCandidate(candidates, addDaysISO(v, joinBaruDateOffsetDays())));
+      rawCandidates.forEach(v => addDateCandidate(candidates, v));
+    }
+
+    return candidates.filter(v => /^\d{4}-\d{2}-\d{2}$/.test(v));
+  }
+
+  function pickJoinDateFromCandidates(candidates, dates) {
+    const unique = Array.from(new Set((candidates || []).filter(Boolean)));
+    const inRange = unique.find(d => d >= dates.start && d <= dates.end);
+    return inRange || unique[0] || '';
+  }
+
+  function setJoinBaruProgress(message) {
+    state.joinBaruProgress = message || '';
+    const el = byId('joinBaruProgressText');
+    if (el) el.textContent = state.joinBaruProgress;
+    const box = byId('joinBaruProgressBox');
+    if (box) box.style.display = state.joinBaruProgress ? '' : 'none';
   }
 
   function getRawCellValue(sheet, r, c) {
@@ -1474,7 +1565,7 @@
       // No ID    = D = index 3
       // Nama     = B = index 1
       // Section  = M = index 12
-      const joindate = normalizeDateCell(getRawCellValue(sheet, r, 16) || getCellText(sheet, r, 16));
+      const joindate = pickJoinDateFromCandidates(getJoinDateCandidates(sheet, r, 16), dates);
       const id = cleanText(getCellText(sheet, r, 3));
       const nama = cleanText(getCellText(sheet, r, 1));
       const sectionRaw = cleanText(getCellText(sheet, r, 12));
@@ -1535,17 +1626,27 @@
     throw new Error(`File Join Baru belum bisa diambil otomatis. Detail: ${errors.join(' | ')}. Solusi paling aman: buka file di Google Drive lalu File > Save as Google Sheets, kemudian pakai link Google Sheets hasil konversi; atau download .xlsx/.xlsb dan upload manual lewat Update Database Baru jika ingin replace.`);
   }
 
+  function waitFrame() {
+    return new Promise(resolve => requestAnimationFrame(() => resolve()));
+  }
+
   async function previewJoinBaruFromLink() {
     try {
       state.syncing = true;
       state.joinBaruSummary = null;
       state.joinBaruRows = [];
+      state.joinBaruProgress = 'Mengambil file Join Baru dari Google Drive...';
       render();
+      await waitFrame();
 
       const wb = await fetchJoinBaruWorkbook();
+      setJoinBaruProgress('File berhasil diambil. Membaca sheet dan memfilter Joindate...');
+      await waitFrame();
       const parsed = parseJoinBaruRows(wb);
 
       if (state.onlineMode) {
+        setJoinBaruProgress('Mengecek ID yang sudah ada di database...');
+        await waitFrame();
         await loadKaryawan();
       }
 
@@ -1583,6 +1684,7 @@
       } else {
         toast('success', 'Preview Join Baru siap', `${rowsToInsert.length} data baru siap masuk database. Periksa tabel lalu tekan Update Database.`);
       }
+      setJoinBaruProgress('Selesai. Silakan periksa hasil preview.');
     } catch (err) {
       console.error(err);
       showInfo('Ambil Join Baru gagal', err.message || String(err), 'error');
@@ -1601,9 +1703,11 @@
       }
 
       state.syncing = true;
+      state.joinBaruProgress = 'Menyiapkan update database...';
       render();
 
       if (state.onlineMode) {
+        setJoinBaruProgress('Mengecek ulang database sebelum insert...');
         await loadKaryawan();
 
         const existingIds = new Set(
@@ -1616,6 +1720,7 @@
         const finalRows = rows.filter(row => !existingIds.has(String(row.id)));
 
         if (finalRows.length) {
+          setJoinBaruProgress(`Mengupdate database: menyimpan ${finalRows.length} data baru...`);
           await insertMissingKaryawanRows(finalRows.map(row => ({
             id: row.id,
             nama: row.nama,
@@ -1642,6 +1747,7 @@
           'Update Join Baru selesai',
           `${finalRows.length} data baru masuk database. ${skippedNow} data batal karena sudah ada.`
         );
+        setJoinBaruProgress('Update selesai. Database sudah diperbarui.');
       } else {
         const existingIds = new Set(
           sanitizeKaryawanRows(state.karyawan || [])
@@ -1667,6 +1773,7 @@
           }
         });
 
+        setJoinBaruProgress(`Mengupdate database lokal: menyimpan ${finalRows.length} data baru...`);
         state.karyawan = sanitizeKaryawanRows([...(state.karyawan || []), ...finalRows]);
         state.totalKaryawanAll = state.karyawan.length;
         saveLocalData();
@@ -1685,12 +1792,14 @@
           'Update Join Baru selesai',
           `${finalRows.length} data baru masuk database lokal. ${skippedNow} data batal karena sudah ada.`
         );
+        setJoinBaruProgress('Update selesai. Database lokal sudah diperbarui.');
       }
     } catch (err) {
       console.error(err);
       showInfo('Update Join Baru gagal', err.message || String(err), 'error');
     } finally {
       state.syncing = false;
+      state.joinBaruProgress = '';
       render();
     }
   }
@@ -1716,12 +1825,16 @@
           <div class="flex flex-wrap gap-3 items-end">
             <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Dari</label><input id="joinBaruStart" type="date" value="${safe(state.joinBaruStart || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
             <div><label class="block text-[10px] uppercase font-black text-slate-400">Tanggal Sampai</label><input id="joinBaruEnd" type="date" value="${safe(state.joinBaruEnd || todayISO())}" class="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-cyan-500" /></div>
-            <button id="btnFetchJoinBaru" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-black shadow-sm">${icon('refresh')} Ambil Data</button>
-          <button id="btnCommitJoinBaru" ${rows.length ? '' : 'disabled'} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${rows.length ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm' : 'bg-slate-200 text-slate-400 cursor-not-allowed'} text-sm font-black">${icon('save')} Update Database</button>
+            <button id="btnFetchJoinBaru" ${state.syncing ? 'disabled' : ''} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${state.syncing ? 'bg-cyan-300 cursor-wait' : 'bg-cyan-600 hover:bg-cyan-700'} text-white text-sm font-black shadow-sm">${icon('refresh')} ${state.syncing ? 'Memproses...' : 'Ambil Data'}</button>
+          <button id="btnCommitJoinBaru" ${rows.length && !state.syncing ? '' : 'disabled'} class="inline-flex items-center gap-2 px-4 py-2 rounded-xl ${rows.length && !state.syncing ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm' : 'bg-slate-200 text-slate-400 cursor-not-allowed'} text-sm font-black">${icon('save')} Update Database</button>
           </div>
           <div class="text-xs text-slate-500 font-semibold">
             ${summary ? `Terbaca: <b>${summary.total}</b> | Siap masuk: <b class="text-emerald-600">${summary.added}</b> | Sudah ada: <b class="text-amber-600">${summary.skipped}</b>` : 'Default tanggal adalah hari ini.'}
           </div>
+        </div>
+        <div id="joinBaruProgressBox" class="${state.joinBaruProgress ? 'flex' : 'hidden'} mx-4 mt-3 mb-1 items-center gap-3 rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800 font-bold">
+          <span class="inline-block w-4 h-4 rounded-full border-2 border-cyan-600 border-t-transparent animate-spin"></span>
+          <span id="joinBaruProgressText">${safe(state.joinBaruProgress || '')}</span>
         </div>
         <div class="overflow-auto flex-1">
           <table class="w-full text-sm text-left">
